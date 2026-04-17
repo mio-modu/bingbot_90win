@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+bot.log
+state.json
+state.json.bak
+engine_state.json
+.env
