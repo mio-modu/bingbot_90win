@@ -106,7 +106,7 @@ def main():
     logger.info("=" * 60)
 
     engine = StrategyEngine()
-    status_interval = 60   # 60초마다 상태 출력
+    status_interval = 10   # 10초마다 상태 출력
     last_status_time = 0.0
 
     try:

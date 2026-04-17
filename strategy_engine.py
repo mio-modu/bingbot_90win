@@ -491,7 +491,7 @@ class StrategyEngine:
             if p.avg_down_step == 0:
                 age_min   = (now - self._current_coin_enter_time) / 60
                 gross_abs = abs(p.gross_pnl(price))
-                if age_min >= FLAT_TIMEOUT_MIN and gross_abs < FLAT_THRESHOLD_USD:
+                if age_min >= FLAT_TIMEOUT_MIN and gross_abs < FLAT_THRESHOLD_USD and net_pnl >= 0:
                     # 더 좋은 코인 스캔 (현재 코인 점수보다 높아야 교체 의미 있음)
                     try:
                         blocked    = set(self._blocked_symbols.keys())

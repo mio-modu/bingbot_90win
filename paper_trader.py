@@ -513,14 +513,8 @@ class PaperTrader:
         if p.crash_short:
             return False   # 트레일 or 시간초과(engine에서 처리)만으로 청산
 
-        # 횡보 DCA 모드: 손익분기 이상에서만 익절 (수수료 커버 보장)
-        # SIDEWAYS_DCA_TP_PCT=2.5% / SIDEWAYS_DCA_MIN_NET=$2 → 어느 단계든 실제 수익 확보
-        if p.sideways_dca:
-            pct_ok = p.pnl_pct(price)      >= config.SIDEWAYS_DCA_TP_PCT
-            usd_ok = p.realized_pnl(price) >= config.SIDEWAYS_DCA_MIN_NET
-            return pct_ok and usd_ok
-
-        # DCA 1단계 이상: 일반 +1% 익절 비활성, 2단계 익절 구조 적용
+        # DCA 1단계 이상($120+): 횡보DCA 여부 무관하게 트레일링 전용
+        #   sideways_dca는 항상 1단계 이상에서만 발동 → 고정TP 대신 트레일에 맡김
         #   +9% 이상 급등 → 트레일링에 맡겨 수익 극대화 (5% 익절 건너뜀)
         #   +5% ~ +8.9%  → 5% 확정 익절 (trail_sl이 avg 아래라 trail 못 믿음)
         if p.avg_down_step >= config.DCA_TRAIL_STEP_THRESHOLD:
@@ -548,9 +542,9 @@ class PaperTrader:
                 return f"{prefix}익절(고점{p.peak_price:.4f}→SL{p.trail_sl:.4f}/순${exit_net:+.2f})"
             else:
                 return f"{prefix}손절(SL{p.trail_sl:.4f}/순${exit_net:+.2f})"
-        if p and p.sideways_dca:
+        if p and p.sideways_dca and p.avg_down_step >= config.DCA_TRAIL_STEP_THRESHOLD:
             net = p.realized_pnl(price)
-            return f"횡보DCA익절({p.avg_down_step}단계+{p.pnl_pct(price):.1%}/순${net:+.2f})"
+            return f"횡보DCA{p.avg_down_step}트레일익절(+{p.pnl_pct(price):.1%}/순${net:+.2f})"
         if (p and p.avg_down_step >= config.DCA_TRAIL_STEP_THRESHOLD
                 and p.pnl_pct(price) >= config.DCA_TRAIL_MAX_PROFIT_PCT):
             return f"DCA{p.avg_down_step}최대익절(+{p.pnl_pct(price):.1%})"
