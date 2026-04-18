@@ -119,6 +119,19 @@ class Position:
         """청산 시 최종 순손익 (진입+청산 비용 전부 차감)"""
         return self.gross_pnl(exit_price) - self._total_cost()
 
+    # ── 비례 트레일링 거리 계산 ─────────────────────────────
+
+    def _stepped_trail_distance(self, profit_pct: float) -> float:
+        """
+        수익의 20%를 숨통으로 허용하는 동적 트레일 거리.
+        peak $100 → $80에서 청산 (어느 수익 수준에서도 20% 숨통)
+        공식: distance = profit_pct × (BREATHING / LEVERAGE)
+        """
+        if profit_pct <= 0:
+            return config.DCA_TRAIL_DIST_MIN
+        dynamic = profit_pct * (config.DCA_TRAIL_BREATHING_RATIO / config.LEVERAGE)
+        return max(config.DCA_TRAIL_DIST_MIN, min(config.DCA_TRAIL_DIST_MAX, dynamic))
+
     # ── 트레일링 업데이트 ────────────────────────────────────
 
     def update_trail(self, price: float):
@@ -127,9 +140,9 @@ class Position:
         - 일반: 포지션 +3% 도달 시 트레일 활성화
         - 하드캡: 포지션 +2% 도달 시 트레일 활성화 (일반 익절 비활성 상태)
         활성화 후 peak 대비 TRAIL_DISTANCE_PCT 되돌리면 trail_sl 갱신.
+        DCA 1단계 이상: 비례 동적 트레일 (수익의 20% 숨통)
         """
         if self.crash_short:
-            # 급락 SHORT: 빠른 트레일 (더 빨리 활성화, 더 빨리 탈출)
             activate = config.CRASH_TRAIL_ACTIVATE_PCT
             distance = config.CRASH_TRAIL_DISTANCE_PCT
         elif self.avg_down_step >= config.DCA_TRAIL_STEP_THRESHOLD:
@@ -138,7 +151,8 @@ class Position:
         else:
             activate = config.TRAIL_ACTIVATE_PCT
             distance = config.TRAIL_DISTANCE_PCT
-        use_dca_trail = self.avg_down_step >= config.DCA_TRAIL_STEP_THRESHOLD
+        use_dca_trail = (self.avg_down_step >= config.DCA_TRAIL_STEP_THRESHOLD
+                         and not self.crash_short)
 
         if self.trend == "UP":
             if price > self.peak_price:
@@ -147,6 +161,8 @@ class Position:
             if profit_pct >= activate:
                 self.trail_active = True
             if self.trail_active:
+                if use_dca_trail:
+                    distance = self._stepped_trail_distance(profit_pct)
                 new_sl = self.peak_price * (1 - distance)
                 if new_sl > self.trail_sl:
                     self.trail_sl = new_sl
@@ -157,6 +173,8 @@ class Position:
             if profit_pct >= activate:
                 self.trail_active = True
             if self.trail_active:
+                if use_dca_trail:
+                    distance = self._stepped_trail_distance(profit_pct)
                 new_sl = self.peak_price * (1 + distance)
                 if new_sl < self.trail_sl or self.trail_sl == 0:
                     self.trail_sl = new_sl
