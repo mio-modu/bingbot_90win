@@ -51,9 +51,9 @@ TRAIL_DISTANCE_PCT  = 0.012  # 고점 대비 코인 1.2% 되돌리면 청산
 #   4단계 $960 → 비용 $15.36 → 분기점 +1.6% → 활성화 +2%
 DCA_TRAIL_STEP_THRESHOLD  = 1       # 이 단계 이상이면 트레일링 전용 (1 = $120 이상)
 DCA_TRAIL_ACTIVATE_PCT    = 0.02    # 포지션 +2% 도달 시 트레일 활성화
-DCA_TRAIL_DISTANCE_PCT    = 0.012   # 고점 대비 코인 1.2% 되돌리면 청산
-DCA_TRAIL_MAX_PROFIT_PCT  = 0.05    # 포지션 +5% 도달 시 확정 익절 (trail fallback)
-DCA_TRAIL_SWITCH_PCT      = 0.09    # 포지션 +9% 이상 급등 시 → 5% 익절 건너뛰고 트레일링으로 전환
+DCA_TRAIL_DISTANCE_PCT    = 0.008   # 고점 대비 코인 0.8% 되돌리면 청산 (기존 1.2% → 타이트하게)
+DCA_TRAIL_MAX_PROFIT_PCT  = 0.99    # 사실상 비활성화 (순수 트레일링 전용)
+DCA_TRAIL_SWITCH_PCT      = 0.02    # 트레일 활성화 즉시 트레일링 전용 (확정 익절 없음)
 
 # ────────────────────────────────────────────────
 #  물타기 설정
