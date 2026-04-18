@@ -94,6 +94,12 @@ MAX_NET_LOSS_USD        = -150.0  # 순손익이 이 이하면 즉시 손절
 # (가격 기반 트리거 -12% 대신 손실금액으로 판단)
 DCA_STEP4_NET_LOSS_TRIGGER = -80.0  # 순손익 -$80 도달 시 4단계 DCA 강제 투입
 
+# 4단계 DCA 강화 차단 조건
+ADVERSE_CANDLE_BLOCK_STEP4 = 2      # 4단계는 역방향 캔들 2개만 있어도 차단 (일반 3개보다 강화)
+DCA_STEP4_DAILY_MAX        = 2      # 4단계 DCA 하루 최대 횟수 제한
+BTC_DCA4_DROP_PCT          = -0.01  # BTC 최근 15분 -1% 이상 하락 시 4단계 차단
+BTC_DCA4_WINDOW_MIN        = 15     # BTC 하락 감지 윈도우 (분)
+
 # 하드캡 이후 손절
 HARD_CAP_STOP_COIN_PCT  = -0.02  # 코인 추가 -2% → 전량 손절 (강화)
 

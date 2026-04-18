@@ -62,6 +62,9 @@ class StrategyEngine:
         self._in_crash_mode: bool  = False      # 급락 SHORT 모드 활성
         self._crash_retry_count: int = 0        # 이번 급락에서 재진입 횟수
         self._crash_mode_start: float = 0.0    # 급락 모드 시작 시각
+        # 4단계 DCA 일일 횟수 제한
+        self._dca_step4_today_count: int = 0
+        self._dca_step4_date: str = ""
         self._load_engine_state()
 
     # ────────────────────────────────────────────────
@@ -137,6 +140,46 @@ class StrategyEngine:
         except Exception as e:
             logger.debug(f"BTC 가격 조회 실패: {e}")
         return False
+
+    # ────────────────────────────────────────────────
+    #  4단계 DCA 강화 조건 체크
+    # ────────────────────────────────────────────────
+    def _is_btc_declining(self) -> bool:
+        """BTC가 최근 N분간 X% 이상 하락 중이면 True (4단계 DCA 차단용)"""
+        if len(self._btc_price_hist) < 2:
+            return False
+        now = time.time()
+        window = config.BTC_DCA4_WINDOW_MIN * 60
+        recent = [(t, p) for t, p in self._btc_price_hist if now - t <= window]
+        if len(recent) < 2:
+            return False
+        change = (recent[-1][1] - recent[0][1]) / recent[0][1]
+        if change <= config.BTC_DCA4_DROP_PCT:
+            logger.info(
+                f"[BTC하락감지] {change:.2%} ({config.BTC_DCA4_WINDOW_MIN}분) "
+                f"→ 4단계 DCA 차단"
+            )
+            return True
+        return False
+
+    def _check_step4_daily_limit(self) -> bool:
+        """4단계 DCA 일일 한도 체크. True면 진입 가능"""
+        today = time.strftime("%Y-%m-%d")
+        if self._dca_step4_date != today:
+            self._dca_step4_date = today
+            self._dca_step4_today_count = 0
+        return self._dca_step4_today_count < config.DCA_STEP4_DAILY_MAX
+
+    def _record_step4_dca(self):
+        """4단계 DCA 사용 횟수 기록"""
+        today = time.strftime("%Y-%m-%d")
+        if self._dca_step4_date != today:
+            self._dca_step4_date = today
+            self._dca_step4_today_count = 0
+        self._dca_step4_today_count += 1
+        logger.info(
+            f"[4단계DCA] 오늘 {self._dca_step4_today_count}/{config.DCA_STEP4_DAILY_MAX}회 사용"
+        )
 
     # ────────────────────────────────────────────────
     #  역방향 연속 캔들 카운트
@@ -414,15 +457,29 @@ class StrategyEngine:
 
             # 4. 물타기 (가격 기반)
             #    역방향 연속 캔들 N개 이상이면 추세 전환 의심 → DCA 보류
+            #    4단계는 추가 조건: BTC 하락 중 차단 / 하루 최대 2회 제한 / 캔들 2개 차단
             adverse_candles = None   # lazy 계산 (step 5에서도 재사용)
             if self.pt.should_avg_down(price):
                 adverse_candles = self._count_adverse_candles(p.symbol, p.trend)
-                if adverse_candles >= ADVERSE_CANDLE_BLOCK:
+                going_to_step4  = (p.avg_down_step == 3)
+                candle_limit    = (config.ADVERSE_CANDLE_BLOCK_STEP4
+                                   if going_to_step4 else ADVERSE_CANDLE_BLOCK)
+
+                if adverse_candles >= candle_limit:
                     logger.info(
                         f"[DCA차단] {p.symbol} | 역방향 15m 캔들 {adverse_candles}개 연속 "
-                        f"→ 가격DCA 보류 (추세전환 가능성)"
+                        f"→ {'4단계' if going_to_step4 else ''}가격DCA 보류 (추세전환 가능성)"
+                    )
+                elif going_to_step4 and self._is_btc_declining():
+                    logger.info(f"[4단계DCA차단] {p.symbol} | BTC 하락 중 → 4단계 투입 보류")
+                elif going_to_step4 and not self._check_step4_daily_limit():
+                    logger.info(
+                        f"[4단계DCA차단] {p.symbol} | 오늘 {self._dca_step4_today_count}/"
+                        f"{config.DCA_STEP4_DAILY_MAX}회 한도 초과 → 보류"
                     )
                 else:
+                    if going_to_step4:
+                        self._record_step4_dca()
                     self.pt.execute_avg_down(price)
                     return
 
@@ -440,10 +497,22 @@ class StrategyEngine:
                 if step_age_min >= SIDEWAYS_DCA_WAIT_MIN:
                     if adverse_candles is None:
                         adverse_candles = self._count_adverse_candles(p.symbol, p.trend)
-                    if adverse_candles >= ADVERSE_CANDLE_BLOCK:
+                    going_to_step4 = (p.avg_down_step == 3)
+                    candle_limit   = (config.ADVERSE_CANDLE_BLOCK_STEP4
+                                      if going_to_step4 else ADVERSE_CANDLE_BLOCK)
+                    if adverse_candles >= candle_limit:
                         logger.info(
                             f"[횡보DCA차단] {p.symbol} | 역방향 15m 캔들 {adverse_candles}개 연속 "
                             f"→ 횡보DCA 보류 (추세전환 가능성)"
+                        )
+                        return
+                    if going_to_step4 and self._is_btc_declining():
+                        logger.info(f"[횡보4단계DCA차단] {p.symbol} | BTC 하락 중 → 보류")
+                        return
+                    if going_to_step4 and not self._check_step4_daily_limit():
+                        logger.info(
+                            f"[횡보4단계DCA차단] {p.symbol} | 오늘 {self._dca_step4_today_count}/"
+                            f"{config.DCA_STEP4_DAILY_MAX}회 한도 초과 → 보류"
                         )
                         return
                     next_amt = p.next_avg_down_amount()
@@ -453,6 +522,8 @@ class StrategyEngine:
                         f"→ {p.avg_down_step+1}단계 강제 투입 +${next_amt:.0f} "
                         f"(총 ${p.total_invested+next_amt:.0f})"
                     )
+                    if going_to_step4:
+                        self._record_step4_dca()
                     self.pt.execute_sideways_avg_down(price)
                     return
 
