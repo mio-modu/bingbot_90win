@@ -572,7 +572,18 @@ class PaperTrader:
             3: config.AVG_DOWN_STEP4_TRIGGER,
         }
         delta = p.pnl_pct(price) - p.step_ref_pnl
-        return delta <= triggers[p.avg_down_step]
+        if delta <= triggers[p.avg_down_step]:
+            return True
+
+        # 4단계 DCA: 순손익 -$80 도달 시 강제 투입 (가격 트리거 대안)
+        if p.avg_down_step == 3 and p.net_pnl(price) <= config.DCA_STEP4_NET_LOSS_TRIGGER:
+            logger.info(
+                f"[4단계DCA-손실트리거] {p.symbol} | 순손익 ${p.net_pnl(price):.2f} "
+                f"≤ ${config.DCA_STEP4_NET_LOSS_TRIGGER:.0f} → 4단계 $480 투입"
+            )
+            return True
+
+        return False
 
     def execute_avg_down(self, price: float):
         p = self.position
