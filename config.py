@@ -55,14 +55,14 @@ DCA_TRAIL_DISTANCE_PCT    = 0.008   # 기본값 (단계별 동적 계산으로 �
 DCA_TRAIL_MAX_PROFIT_PCT  = 0.99    # 사실상 비활성화 (순수 트레일링 전용)
 DCA_TRAIL_SWITCH_PCT      = 0.02    # 트레일 활성화 즉시 트레일링 전용 (확정 익절 없음)
 
-# 비례 동적 트레일링 (수익의 20%를 숨통으로)
+# 비례 동적 트레일링 (수익의 30%를 숨통으로)
 # 공식: coin_distance = profit_pct × (BREATHING / LEVERAGE)
 # 예시($960 기준):
-#   peak $50  → 숨통 $10  → $40에서 청산
-#   peak $100 → 숨통 $20  → $80에서 청산
-#   peak $200 → 숨통 $40  → $160에서 청산
-#   → 얼마를 벌든 항상 수익의 80% 확정
-DCA_TRAIL_BREATHING_RATIO = 0.20   # 수익의 20%를 숨통으로 허용
+#   peak $50  → 숨통 $15  → $35에서 청산
+#   peak $100 → 숨통 $30  → $70에서 청산
+#   peak $200 → 숨통 $60  → $140에서 청산
+#   → 얼마를 벌든 항상 수익의 70% 확정
+DCA_TRAIL_BREATHING_RATIO = 0.30   # 수익의 30%를 숨통으로 허용
 DCA_TRAIL_DIST_MIN        = 0.003  # 최소 0.3% (변동성 대응 하한선)
 DCA_TRAIL_DIST_MAX        = 0.020  # 최대 2.0% (초기 저수익 구간 상한선)
 
