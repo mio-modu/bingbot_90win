@@ -190,7 +190,7 @@ class StrategyEngine:
         (마지막 캔들은 미완성이므로 제외)
         """
         try:
-            klines = self.api.get_klines(symbol, "15m", limit=7)
+            klines = self.api.get_klines(symbol, "15m", limit=9)
             completed = klines[:-1] if len(klines) > 1 else klines
             count = 0
             for k in reversed(completed):

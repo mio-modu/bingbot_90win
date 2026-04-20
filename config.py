@@ -107,7 +107,7 @@ DCA_STEP4_NET_LOSS_TRIGGER = -80.0  # 순손익 -$80 도달 시 4단계 DCA 강�
 
 # 4단계 DCA 강화 차단 조건
 ADVERSE_CANDLE_BLOCK_STEP4 = 2      # 4단계는 역방향 캔들 2개만 있어도 차단 (일반 3개보다 강화)
-DCA_STEP4_DAILY_MAX        = 2      # 4단계 DCA 하루 최대 횟수 제한
+DCA_STEP4_DAILY_MAX        = 3      # 4단계 DCA 하루 최대 횟수 제한
 BTC_DCA4_DROP_PCT          = -0.01  # BTC 최근 15분 -1% 이상 하락 시 4단계 차단
 BTC_DCA4_WINDOW_MIN        = 15     # BTC 하락 감지 윈도우 (분)
 
@@ -138,7 +138,9 @@ CRASH_MAX_RETRIES        = 3      # 손절 후 최대 재진입 횟수
 
 # 역방향 연속 캔들 DCA 차단
 # 추세 반대 방향 15m 캔들이 N개 연속 → 추세 전환 의심 → DCA 투입 차단
-ADVERSE_CANDLE_BLOCK = 3       # 역방향 연속 캔들 N개 이상 → DCA 중단
+# limit=9 조회 시 완성 캔들 최대 8개 → 9는 사실상 비활성화 (가격 트리거만으로 판단)
+# 4단계만 ADVERSE_CANDLE_BLOCK_STEP4=2 로 엄격하게 유지
+ADVERSE_CANDLE_BLOCK = 9       # 역방향 연속 캔들 N개 이상 → DCA 중단
 
 # ────────────────────────────────────────────────
 #  코인 교체 설정
