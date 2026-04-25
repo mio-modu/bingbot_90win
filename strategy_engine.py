@@ -19,7 +19,8 @@ from config import (
     MAX_COIN_DURATION_MIN, MAX_TOTAL_POSITION,
     FLAT_TIMEOUT_MIN, FLAT_THRESHOLD_USD, FLAT_BLOCK_MIN,
     UPGRADE_SCAN_MIN, UPGRADE_SCORE_MULT, UPGRADE_MAX_LOSS_USD,
-    SIDEWAYS_DCA_WAIT_MIN, SIDEWAYS_DCA_MIN_STEP, SIDEWAYS_BLOCK_MIN,
+    SIDEWAYS_DCA_WAIT_PER_STEP, SIDEWAYS_LAST_STAGE_TIMEOUT_MIN,
+    SIDEWAYS_DCA_MIN_STEP, SIDEWAYS_BLOCK_MIN,
     SIDEWAYS_DCA_TP_PCT, SIDEWAYS_DCA_MIN_NET,
     BTC_SHOCK_PCT, BTC_SHOCK_WINDOW_MIN, BTC_SHOCK_BLOCK_MIN,
     ADVERSE_CANDLE_BLOCK,
@@ -62,9 +63,11 @@ class StrategyEngine:
         self._in_crash_mode: bool  = False      # 급락 SHORT 모드 활성
         self._crash_retry_count: int = 0        # 이번 급락에서 재진입 횟수
         self._crash_mode_start: float = 0.0    # 급락 모드 시작 시각
-        # 4단계 DCA 일일 횟수 제한
+        # 4·5단계 DCA 일일 횟수 제한
         self._dca_step4_today_count: int = 0
         self._dca_step4_date: str = ""
+        self._dca_step5_today_count: int = 0
+        self._dca_step5_date: str = ""
         self._load_engine_state()
 
     # ────────────────────────────────────────────────
@@ -163,7 +166,6 @@ class StrategyEngine:
         return False
 
     def _check_step4_daily_limit(self) -> bool:
-        """4단계 DCA 일일 한도 체크. True면 진입 가능"""
         today = time.strftime("%Y-%m-%d")
         if self._dca_step4_date != today:
             self._dca_step4_date = today
@@ -171,15 +173,27 @@ class StrategyEngine:
         return self._dca_step4_today_count < config.DCA_STEP4_DAILY_MAX
 
     def _record_step4_dca(self):
-        """4단계 DCA 사용 횟수 기록"""
         today = time.strftime("%Y-%m-%d")
         if self._dca_step4_date != today:
             self._dca_step4_date = today
             self._dca_step4_today_count = 0
         self._dca_step4_today_count += 1
-        logger.info(
-            f"[4단계DCA] 오늘 {self._dca_step4_today_count}/{config.DCA_STEP4_DAILY_MAX}회 사용"
-        )
+        logger.info(f"[4단계DCA] 오늘 {self._dca_step4_today_count}/{config.DCA_STEP4_DAILY_MAX}회 사용")
+
+    def _check_step5_daily_limit(self) -> bool:
+        today = time.strftime("%Y-%m-%d")
+        if self._dca_step5_date != today:
+            self._dca_step5_date = today
+            self._dca_step5_today_count = 0
+        return self._dca_step5_today_count < config.DCA_STEP5_DAILY_MAX
+
+    def _record_step5_dca(self):
+        today = time.strftime("%Y-%m-%d")
+        if self._dca_step5_date != today:
+            self._dca_step5_date = today
+            self._dca_step5_today_count = 0
+        self._dca_step5_today_count += 1
+        logger.info(f"[5단계DCA] 오늘 {self._dca_step5_today_count}/{config.DCA_STEP5_DAILY_MAX}회 사용")
 
     # ────────────────────────────────────────────────
     #  역방향 연속 캔들 카운트
@@ -377,9 +391,19 @@ class StrategyEngine:
 
             # 2. 최대 손실 한도 손절 (단계 무관)
             if self.pt.is_max_loss_stop(price):
-                was_crash = p.crash_short
+                was_crash  = p.crash_short
+                symbol     = p.symbol
+                stage      = p.avg_down_step
                 self._close("최대손실손절")
                 self._last_scan_time = 0
+                # 고단계(3+) 손절 → 해당 코인 48시간 차단 (반복 손실 방지)
+                if not was_crash and stage >= 3:
+                    block_until = now + 48 * 3600
+                    self._blocked_symbols[symbol] = block_until
+                    self._save_engine_state()
+                    logger.warning(
+                        f"[손절코인차단] {symbol} | {stage}단계 최대손실손절 → 48시간 차단"
+                    )
                 # 급락 SHORT 손절: BTC 아직 급락 중이고 재진입 여력 있으면 즉시 재스캔
                 if was_crash:
                     if (now < self._market_shock_until and
@@ -456,58 +480,86 @@ class StrategyEngine:
                 return
 
             # 4. 물타기 (가격 기반)
-            #    역방향 연속 캔들 N개 이상이면 추세 전환 의심 → DCA 보류
-            #    4단계는 추가 조건: BTC 하락 중 차단 / 하루 최대 2회 제한 / 캔들 2개 차단
+            #    4·5단계: BTC 하락 차단 / 일일 한도 / 역방향 캔들 2개 차단
             adverse_candles = None   # lazy 계산 (step 5에서도 재사용)
             if self.pt.should_avg_down(price):
                 adverse_candles = self._count_adverse_candles(p.symbol, p.trend)
                 going_to_step4  = (p.avg_down_step == 3)
+                going_to_step5  = (p.avg_down_step == 4)
+                is_final_stages = going_to_step4 or going_to_step5
                 candle_limit    = (config.ADVERSE_CANDLE_BLOCK_STEP4
-                                   if going_to_step4 else ADVERSE_CANDLE_BLOCK)
+                                   if is_final_stages else ADVERSE_CANDLE_BLOCK)
 
                 if adverse_candles >= candle_limit:
+                    step_label = "4단계" if going_to_step4 else ("5단계" if going_to_step5 else "")
                     logger.info(
                         f"[DCA차단] {p.symbol} | 역방향 15m 캔들 {adverse_candles}개 연속 "
-                        f"→ {'4단계' if going_to_step4 else ''}가격DCA 보류 (추세전환 가능성)"
+                        f"→ {step_label}가격DCA 보류 (추세전환 가능성)"
                     )
-                elif going_to_step4 and self._is_btc_declining():
-                    logger.info(f"[4단계DCA차단] {p.symbol} | BTC 하락 중 → 4단계 투입 보류")
+                elif is_final_stages and self._is_btc_declining():
+                    step_label = "4단계" if going_to_step4 else "5단계"
+                    logger.info(f"[{step_label}DCA차단] {p.symbol} | BTC 하락 중 → 투입 보류")
                 elif going_to_step4 and not self._check_step4_daily_limit():
                     logger.info(
                         f"[4단계DCA차단] {p.symbol} | 오늘 {self._dca_step4_today_count}/"
                         f"{config.DCA_STEP4_DAILY_MAX}회 한도 초과 → 보류"
                     )
+                elif going_to_step5 and not self._check_step5_daily_limit():
+                    logger.info(
+                        f"[5단계DCA차단] {p.symbol} | 오늘 {self._dca_step5_today_count}/"
+                        f"{config.DCA_STEP5_DAILY_MAX}회 한도 초과 → 보류"
+                    )
                 else:
                     if going_to_step4:
                         self._record_step4_dca()
+                    elif going_to_step5:
+                        self._record_step5_dca()
                     self.pt.execute_avg_down(price)
                     return
 
-            # 5. 횡보 DCA: 1단계 이상에서 N분 경과해도 가격 DCA 미발동 → 강제 평단 낮추기
-            #    조건: 현재가가 평균단가 아래여야 함 (위에서 투입 시 평단이 오히려 올라감)
-            #    역방향 연속 캔들 N개 이상이면 횡보DCA도 차단
+            # 5. 횡보 DCA (단계별 대기시간) + 마지막 단계 횡보 청산
+            #    1 ~ MAX_DCA_STAGES-1 단계: N분 경과 → 다음 단계 DCA
+            #    MAX_DCA_STAGES 단계(마지막): N분 경과 → 청산 (마지막 결전)
             below_avg = (p.trend == "UP"   and price < p.avg_price) or \
                         (p.trend == "DOWN" and price > p.avg_price)
+            is_last_stage = (p.avg_down_step == config.MAX_DCA_STAGES)
+
             if (below_avg and
                     p.avg_down_step >= SIDEWAYS_DCA_MIN_STEP and
-                    p.avg_down_step < 4 and
-                    p.total_invested < p.max_position and
+                    p.avg_down_step <= config.MAX_DCA_STAGES and
                     p.step_enter_time > 0):
                 step_age_min = (now - p.step_enter_time) / 60
-                if step_age_min >= SIDEWAYS_DCA_WAIT_MIN:
+                wait_min = (SIDEWAYS_LAST_STAGE_TIMEOUT_MIN if is_last_stage
+                            else SIDEWAYS_DCA_WAIT_PER_STEP.get(p.avg_down_step, 10))
+
+                if step_age_min >= wait_min:
+                    # ── 마지막 단계: 청산 ──────────────────────────
+                    if is_last_stage:
+                        logger.warning(
+                            f"[마지막결전] {p.symbol} | {p.avg_down_step}단계 "
+                            f"{step_age_min:.0f}분 횡보 → 손절 청산 | 순손익 ${net_pnl:+.2f}"
+                        )
+                        self._close("마지막결전청산")
+                        self._last_scan_time = 0
+                        return
+
+                    # ── 중간 단계: 다음 단계 DCA ─────────────────
                     if adverse_candles is None:
                         adverse_candles = self._count_adverse_candles(p.symbol, p.trend)
                     going_to_step4 = (p.avg_down_step == 3)
+                    going_to_step5 = (p.avg_down_step == 4)
+                    is_final_stages = going_to_step4 or going_to_step5
                     candle_limit   = (config.ADVERSE_CANDLE_BLOCK_STEP4
-                                      if going_to_step4 else ADVERSE_CANDLE_BLOCK)
+                                      if is_final_stages else ADVERSE_CANDLE_BLOCK)
                     if adverse_candles >= candle_limit:
                         logger.info(
                             f"[횡보DCA차단] {p.symbol} | 역방향 15m 캔들 {adverse_candles}개 연속 "
                             f"→ 횡보DCA 보류 (추세전환 가능성)"
                         )
                         return
-                    if going_to_step4 and self._is_btc_declining():
-                        logger.info(f"[횡보4단계DCA차단] {p.symbol} | BTC 하락 중 → 보류")
+                    if is_final_stages and self._is_btc_declining():
+                        step_label = "4단계" if going_to_step4 else "5단계"
+                        logger.info(f"[횡보{step_label}DCA차단] {p.symbol} | BTC 하락 중 → 보류")
                         return
                     if going_to_step4 and not self._check_step4_daily_limit():
                         logger.info(
@@ -515,15 +567,23 @@ class StrategyEngine:
                             f"{config.DCA_STEP4_DAILY_MAX}회 한도 초과 → 보류"
                         )
                         return
+                    if going_to_step5 and not self._check_step5_daily_limit():
+                        logger.info(
+                            f"[횡보5단계DCA차단] {p.symbol} | 오늘 {self._dca_step5_today_count}/"
+                            f"{config.DCA_STEP5_DAILY_MAX}회 한도 초과 → 보류"
+                        )
+                        return
                     next_amt = p.next_avg_down_amount()
                     logger.info(
                         f"[횡보DCA] {p.symbol} | {p.avg_down_step}단계 "
-                        f"{step_age_min:.1f}분 경과 | 현재가({price:.6f}) < 평단({p.avg_price:.6f}) "
-                        f"→ {p.avg_down_step+1}단계 강제 투입 +${next_amt:.0f} "
+                        f"{step_age_min:.1f}분 경과 | 현재가({price:.6f}) vs 평단({p.avg_price:.6f}) "
+                        f"→ {p.avg_down_step+1}단계 투입 +${next_amt:.0f} "
                         f"(총 ${p.total_invested+next_amt:.0f})"
                     )
                     if going_to_step4:
                         self._record_step4_dca()
+                    elif going_to_step5:
+                        self._record_step5_dca()
                     self.pt.execute_sideways_avg_down(price)
                     return
 

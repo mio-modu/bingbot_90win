@@ -75,9 +75,9 @@ class Position:
 
     @property
     def max_position(self) -> float:
-        """하드캡: 진입 시 시드 × 16"""
+        """하드캡: 진입 시 시드 × 20 (5단계 기준)"""
         base = self.initial_invest if self.initial_invest > 0 else config.INITIAL_POSITION_USD
-        return base * 16
+        return base * 20
 
     def __post_init__(self):
         if self.peak_price == 0.0:
@@ -211,7 +211,7 @@ class Position:
 
     def next_avg_down_amount(self) -> float:
         base = self.initial_invest if self.initial_invest > 0 else config.INITIAL_POSITION_USD
-        amounts = {0: base, 1: base * 2, 2: base * 4, 3: base * 8}
+        amounts = {0: base, 1: base * 2, 2: base * 4, 3: base * 8, 4: base * 4}
         return amounts.get(self.avg_down_step, 0.0)
 
     # ── 물타기 실행 ──────────────────────────────────────────
@@ -377,8 +377,7 @@ class PaperTrader:
                     if p.step_enter_time == 0 and p.avg_down_step >= 1:
                         p.step_enter_time = time.time()
                         logger.info(
-                            f"[state] step_enter_time 복원: 현재 시간으로 초기화 "
-                            f"(즉시 횡보DCA 방지, {config.SIDEWAYS_DCA_WAIT_MIN}분 후 재평가)"
+                            f"[state] step_enter_time 복원: 현재 시간으로 초기화 (즉시 횡보DCA 방지)"
                         )
                     # 재시작 시 트레일 유효성 검증
                     # trail_sl이 평균단가보다 유리한 위치에 있어야만 유지
@@ -576,7 +575,7 @@ class PaperTrader:
             return False
         if p.total_invested >= p.max_position:
             return False
-        if p.avg_down_step >= 4:
+        if p.avg_down_step >= config.MAX_DCA_STAGES:
             return False
         # 트레일이 수익권(trail_sl > avg_price)일 때만 물타기 차단
         # trail_sl이 avg_price 아래면 이미 손실 구간 → 물타기 허용
@@ -588,16 +587,23 @@ class PaperTrader:
             1: config.AVG_DOWN_STEP2_TRIGGER,
             2: config.AVG_DOWN_STEP3_TRIGGER,
             3: config.AVG_DOWN_STEP4_TRIGGER,
+            4: config.AVG_DOWN_STEP5_TRIGGER,
         }
         delta = p.pnl_pct(price) - p.step_ref_pnl
-        if delta <= triggers[p.avg_down_step]:
+        if delta <= triggers.get(p.avg_down_step, -999):
             return True
 
-        # 4단계 DCA: 순손익 -$80 도달 시 강제 투입 (가격 트리거 대안)
+        # 손실 기반 강제 투입 트리거
         if p.avg_down_step == 3 and p.net_pnl(price) <= config.DCA_STEP4_NET_LOSS_TRIGGER:
             logger.info(
                 f"[4단계DCA-손실트리거] {p.symbol} | 순손익 ${p.net_pnl(price):.2f} "
-                f"≤ ${config.DCA_STEP4_NET_LOSS_TRIGGER:.0f} → 4단계 $480 투입"
+                f"≤ ${config.DCA_STEP4_NET_LOSS_TRIGGER:.0f} → 4단계 투입"
+            )
+            return True
+        if p.avg_down_step == 4 and p.net_pnl(price) <= config.DCA_STEP5_NET_LOSS_TRIGGER:
+            logger.info(
+                f"[5단계DCA-손실트리거] {p.symbol} | 순손익 ${p.net_pnl(price):.2f} "
+                f"≤ ${config.DCA_STEP5_NET_LOSS_TRIGGER:.0f} → 5단계 투입"
             )
             return True
 

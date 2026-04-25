@@ -51,6 +51,16 @@ EXCLUDE_LARGE_CAPS = {
     "1000PEPE-USDT", "1000SHIB-USDT",
 }
 
+# ── 손절 반복 코인 영구 블랙리스트 ────────────────────────
+# 고단계(3+) 최대손실손절 반복으로 누적 대규모 손실을 유발한 코인
+BLACKLIST = {
+    "SAGA-USDT",          # 3× 최대손실손절 (-$305, -$283, -$259) 누적 -$847
+    "ZRO-USDT",           # 4단계 최대손실손절 (-$495)
+    "ZEC-USDT",           # 4단계 최대손실손절 (-$409)
+    "NCSKMRVL2USD-USDT",  # 4단계 최대손실손절 (-$270)
+    "ARB-USDT",           # 4단계 최대손실손절 (-$268)
+}
+
 
 def calc_adx(klines: list, period: int = 14) -> float:
     """
@@ -194,6 +204,10 @@ class CoinScanner:
 
             # ── 대형 코인 제외 (유통량 과다 → 둔한 움직임) ─
             if symbol in EXCLUDE_LARGE_CAPS:
+                continue
+
+            # ── 블랙리스트 제외 (반복 고단계 손절 코인) ──
+            if symbol in BLACKLIST:
                 continue
 
             # ── 지수·원자재 추종 상품 제외 ───────────────
@@ -419,6 +433,8 @@ class CoinScanner:
             if not symbol.endswith("-USDT"):
                 continue
             if symbol in EXCLUDE_LARGE_CAPS:
+                continue
+            if symbol in BLACKLIST:
                 continue
             if any(kw in symbol for kw in EXCLUDE_KEYWORDS):
                 continue
