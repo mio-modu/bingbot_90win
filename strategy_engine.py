@@ -365,6 +365,14 @@ class StrategyEngine:
             self.pt.update_price_hist(price, volume)
             self.pt.update_trail(price)
 
+            # 불타기: 트레일 활성화 순간 1회 추가 진입 (0·1단계, crash_short 제외)
+            if (config.PYRAMID_ENABLED and
+                    not p.crash_short and
+                    p.avg_down_step <= config.PYRAMID_MAX_STEP and
+                    p.trail_active and
+                    not p.pyramid_done):
+                self.pt.execute_pyramid(price)
+
             # 로그 (net_pnl = realized_pnl: 진입+청산 비용 모두 반영한 실질 손익)
             net_pnl     = p.realized_pnl(price)
             pnl_pct     = p.pnl_pct(price)

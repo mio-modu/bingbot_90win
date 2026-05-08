@@ -69,15 +69,26 @@ class Position:
     # 급락 SHORT 모드
     crash_short:     bool   = False  # BTC 충격 시 역방향 단타 여부
 
+    # 불타기 (트레일 활성화 시 1회 추가 진입)
+    pyramid_done:     bool  = False  # 불타기 완료 여부 (1회만)
+    pyramid_qty:      float = 0.0    # 추가 진입 수량
+    pyramid_invested: float = 0.0    # 추가 투입금액
+
+    # 진입 시 확정 자본 (하드캡 상한을 자본 이내로 제한)
+    capital_at_open:  float = 0.0
+
     # 급락 감지용 가격 히스토리: [timestamp, price, volume]
     price_hist:      list   = field(default_factory=list)
     low_vol_start:   float  = 0.0
 
     @property
     def max_position(self) -> float:
-        """하드캡: 진입 시 시드 × 20 (5단계 기준)"""
-        base = self.initial_invest if self.initial_invest > 0 else config.INITIAL_POSITION_USD
-        return base * 20
+        """하드캡: 진입 시 시드 × 20, 단 실제 보유 자본을 초과하지 않음"""
+        base     = self.initial_invest if self.initial_invest > 0 else config.INITIAL_POSITION_USD
+        hard_cap = base * 20
+        if self.capital_at_open > 0:
+            return min(hard_cap, self.capital_at_open)
+        return hard_cap
 
     def __post_init__(self):
         if self.peak_price == 0.0:
@@ -255,6 +266,27 @@ class Position:
             f"슬리피지: ${slip_usd:.3f} | 수수료: ${fee_usd:.3f}"
         )
 
+    def apply_pyramid(self, raw_price: float, add_usd: float):
+        """불타기: 트레일 활성화(수익권) 시 추가 진입, avg_price 재계산"""
+        fill_price = _apply_slip(raw_price, self.trend, entry=True)
+        add_qty    = (add_usd * config.LEVERAGE) / fill_price
+        prev_cost  = self.avg_price * self.total_qty
+        new_cost   = prev_cost + add_qty * fill_price
+        self.total_qty       += add_qty
+        self.total_invested  += add_usd
+        self.avg_price        = new_cost / self.total_qty
+        self.pyramid_done     = True
+        self.pyramid_qty      = add_qty
+        self.pyramid_invested = add_usd
+        slip_usd = add_usd * config.LEVERAGE * config.SLIPPAGE_RATE
+        fee_usd  = add_usd * config.LEVERAGE * config.TAKER_FEE_RATE
+        logger.info(
+            f"[불타기🔥] {self.symbol} | 트레일 활성 → "
+            f"추가 ${add_usd:.0f} | 체결가: {fill_price:.6f} | "
+            f"새 평균단가: {self.avg_price:.6f} | 총투입: ${self.total_invested:.0f} | "
+            f"수수료: ${fee_usd:.3f} | 슬리피지: ${slip_usd:.3f}"
+        )
+
 
 # ────────────────────────────────────────────────────────────
 #  슬리피지 헬퍼
@@ -312,6 +344,10 @@ class PaperTrader:
                 "sideways_dca":    p.sideways_dca,
                 "step_enter_time": p.step_enter_time,
                 "crash_short":     p.crash_short,
+                "pyramid_done":     p.pyramid_done,
+                "pyramid_qty":      p.pyramid_qty,
+                "pyramid_invested": p.pyramid_invested,
+                "capital_at_open":  p.capital_at_open,
             }
         data = {
             "total_pnl":     self.total_pnl,
@@ -364,6 +400,10 @@ class PaperTrader:
                         sideways_dca    = bool(pd.get("sideways_dca", False)),
                         step_enter_time = float(pd.get("step_enter_time", 0.0)),
                         crash_short     = bool(pd.get("crash_short", False)),
+                        pyramid_done     = bool(pd.get("pyramid_done", False)),
+                        pyramid_qty      = float(pd.get("pyramid_qty", 0.0)),
+                        pyramid_invested = float(pd.get("pyramid_invested", 0.0)),
+                        capital_at_open  = float(pd.get("capital_at_open", 0.0)),
                     )
                     # initial_invest 마이그레이션
                     # (구버전 state.json에 필드 없을 때 → 현재 config 시드로 설정)
@@ -442,6 +482,7 @@ class PaperTrader:
             initial_invest  = invest,
             step_enter_time = time.time(),
             crash_short     = crash_short,
+            capital_at_open = self.total_capital + self.total_pnl,
         )
         logger.info(
             f"{tag} {symbol} ({trend}) | 호가: {raw_price:.6f} → "
@@ -529,6 +570,11 @@ class PaperTrader:
         # 급락 SHORT 모드: 트레일링만 사용 (일반 TP 조건 무시)
         if p.crash_short:
             return False   # 트레일 or 시간초과(engine에서 처리)만으로 청산
+
+        # 불타기 완료 후 0단계: 트레일 전용 (standard TP 비활성)
+        # 불타기 직후 같은 틱에서 standard TP가 발동해 손실 청산되는 버그 방지
+        if p.pyramid_done and p.avg_down_step < config.DCA_TRAIL_STEP_THRESHOLD:
+            return False
 
         # DCA 1단계 이상($120+): 횡보DCA 여부 무관하게 트레일링 전용
         #   sideways_dca는 항상 1단계 이상에서만 발동 → 고정TP 대신 트레일에 맡김
@@ -631,6 +677,21 @@ class PaperTrader:
             return
         p.apply_avg_down(price, add_usd)
         p.sideways_dca = True   # TP 조건을 단순 +1%로 전환
+        self.save_state()
+
+    def execute_pyramid(self, price: float):
+        """불타기: 트레일 활성화 시 자본 비례 추가 진입 (0·1단계 각 1회)
+        기준 $1000 → $30(0단계)/$18(1단계), $7800 → $234/$140
+        """
+        p = self.position
+        if not p or p.pyramid_done:
+            return
+        current_cap = self.total_capital + self.total_pnl
+        scale       = current_cap / config.DYNAMIC_SEED_BASE_CAPITAL
+        ratio       = (config.PYRAMID_RATIO if p.avg_down_step == 0
+                       else config.PYRAMID_RATIO_S1)
+        add_usd     = config.INITIAL_POSITION_USD * ratio * scale
+        p.apply_pyramid(price, add_usd)
         self.save_state()
 
     # ── 급락 감지 ────────────────────────────────────────────
