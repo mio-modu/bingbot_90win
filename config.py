@@ -146,7 +146,20 @@ CRASH_SHORT_SEED_RATIO   = 0.5    # 전체 자본의 50% 투입 ($1000 기준 $5
 CRASH_TRAIL_ACTIVATE_PCT = 0.015  # 포지션 +1.5% 시 트레일 활성화 (일반 3% 대신)
 CRASH_TRAIL_DISTANCE_PCT = 0.008  # 고점 대비 0.8% 되돌리면 청산 (일반 1.2% 대신)
 CRASH_MAX_DURATION_MIN   = 15     # 최대 보유 시간 (분) → 초과 시 강제 청산
-CRASH_MAX_RETRIES        = 3      # 손절 후 최대 재진입 횟수
+CRASH_MAX_RETRIES        = 5      # 손절 후 최대 재진입 횟수
+
+# ────────────────────────────────────────────────
+#  급락장 보호 (방향별 손실 한도 + BTC 4시간 추세 필터)
+# ────────────────────────────────────────────────
+# LONG 진입 차단: BTC 4시간 MA 기울기가 임계값 이하 (하락 추세)
+BTC_4H_MA_PERIOD       = 20      # BTC 4시간 MA 기간
+BTC_4H_SLOPE_THRESHOLD = -0.001  # MA 기울기 이하 = 하락 추세 → LONG 진입 차단
+
+# 방향별 일일 손실 한도: 초과 시 해당 방향 차단
+# LONG -$500 → LONG 차단 / SHORT -$500 → SHORT 차단
+# 양방향 차단 → TRADING_PAUSE_MIN 분 전면 매매 금지 (이후 카운터 초기화)
+DAILY_DIR_LOSS_LIMIT   = -500.0  # 방향별 손실 한도 (USD)
+TRADING_PAUSE_MIN      = 60      # 양방향 차단 시 전면 매매 금지 시간 (분)
 
 # 역방향 연속 캔들 DCA 차단
 # 추세 반대 방향 15m 캔들이 N개 연속 → 추세 전환 의심 → DCA 투입 차단

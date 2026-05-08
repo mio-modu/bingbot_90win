@@ -68,6 +68,16 @@ class StrategyEngine:
         self._dca_step4_date: str = ""
         self._dca_step5_today_count: int = 0
         self._dca_step5_date: str = ""
+        # BTC 4시간 추세 필터 (30분 캐시)
+        self._last_btc_4h_check: float = 0.0
+        self._btc_4h_downtrend: bool   = False
+        # 방향별 손실 한도 & 전면 매매 금지
+        self._loss_track_date: str      = ""
+        self._daily_long_loss: float    = 0.0
+        self._daily_short_loss: float   = 0.0
+        self._long_blocked: bool        = False
+        self._short_blocked: bool       = False
+        self._trading_pause_until: float = 0.0
         self._load_engine_state()
 
     # ────────────────────────────────────────────────
@@ -196,6 +206,93 @@ class StrategyEngine:
         logger.info(f"[5단계DCA] 오늘 {self._dca_step5_today_count}/{config.DCA_STEP5_DAILY_MAX}회 사용")
 
     # ────────────────────────────────────────────────
+    #  BTC 4시간 추세 감지 (LONG 진입 차단용)
+    # ────────────────────────────────────────────────
+    def _is_btc_downtrend_4h(self) -> bool:
+        """BTC 4시간 MA 기울기 < BTC_4H_SLOPE_THRESHOLD → True (30분 캐시)."""
+        now = time.time()
+        if now - self._last_btc_4h_check < 1800:
+            return self._btc_4h_downtrend
+        self._last_btc_4h_check = now
+        try:
+            period = config.BTC_4H_MA_PERIOD
+            klines = self.api.get_klines("BTC-USDT", "4h", limit=period + 1)
+            closes = [float(k[4] if isinstance(k, list) else k["close"]) for k in klines]
+            if len(closes) < period + 1:
+                self._btc_4h_downtrend = False
+                return False
+            ma_prev = sum(closes[-(period + 1):-1]) / period
+            ma_curr = sum(closes[-period:]) / period
+            slope = (ma_curr - ma_prev) / ma_prev
+            self._btc_4h_downtrend = slope < config.BTC_4H_SLOPE_THRESHOLD
+            logger.info(
+                f"[BTC4h] MA{period} 기울기: {slope:+.4f} "
+                f"({'하락추세⬇ LONG차단' if self._btc_4h_downtrend else '정상'})"
+            )
+        except Exception as e:
+            logger.debug(f"BTC 4h 캔들 조회 실패: {e}")
+            self._btc_4h_downtrend = False
+        return self._btc_4h_downtrend
+
+    # ────────────────────────────────────────────────
+    #  방향별 손실 한도 관리
+    # ────────────────────────────────────────────────
+    def _reset_daily_loss_if_needed(self):
+        """날짜 변경 시 방향별 손실 카운터 및 차단 초기화."""
+        today = time.strftime("%Y-%m-%d")
+        if self._loss_track_date == today:
+            return
+        self._loss_track_date  = today
+        self._daily_long_loss  = 0.0
+        self._daily_short_loss = 0.0
+        self._long_blocked     = False
+        self._short_blocked    = False
+        if self._trading_pause_until > 0:
+            self._trading_pause_until = 0.0
+        logger.info("[방향차단리셋] 날짜 변경 → 방향별 손실 한도 초기화")
+
+    def _track_direction_loss(self, trend: str, crash_short: bool, pnl: float):
+        """청산 후 방향별 손실 누적 → 한도 초과 시 해당 방향 차단."""
+        if pnl >= 0:
+            return
+        self._reset_daily_loss_if_needed()
+        direction = "SHORT" if (trend == "DOWN" or crash_short) else "LONG"
+        if direction == "LONG":
+            self._daily_long_loss += pnl
+            if not self._long_blocked and self._daily_long_loss <= config.DAILY_DIR_LOSS_LIMIT:
+                self._long_blocked = True
+                logger.warning(
+                    f"[LONG차단] 오늘 LONG 누적손실 ${self._daily_long_loss:+.2f} "
+                    f"≤ 한도 ${config.DAILY_DIR_LOSS_LIMIT:+.0f} → LONG 진입 차단"
+                )
+        else:
+            self._daily_short_loss += pnl
+            if not self._short_blocked and self._daily_short_loss <= config.DAILY_DIR_LOSS_LIMIT:
+                self._short_blocked = True
+                logger.warning(
+                    f"[SHORT차단] 오늘 SHORT 누적손실 ${self._daily_short_loss:+.2f} "
+                    f"≤ 한도 ${config.DAILY_DIR_LOSS_LIMIT:+.0f} → SHORT 진입 차단"
+                )
+        if self._long_blocked and self._short_blocked:
+            self._activate_trading_pause()
+
+    def _activate_trading_pause(self):
+        """LONG·SHORT 양방향 차단 → 전면 매매 금지 + 카운터 초기화."""
+        now = time.time()
+        self._trading_pause_until = now + config.TRADING_PAUSE_MIN * 60
+        resume_time = time.strftime("%H:%M", time.localtime(self._trading_pause_until))
+        logger.warning(
+            f"[전면매매금지] LONG·SHORT 양방향 손실 한도 초과 → "
+            f"{config.TRADING_PAUSE_MIN}분 매매 금지 (재개 예정: {resume_time}) | "
+            f"LONG ${self._daily_long_loss:+.2f} / SHORT ${self._daily_short_loss:+.2f}"
+        )
+        # 재개 시 새 출발 (카운터·차단 초기화)
+        self._long_blocked     = False
+        self._short_blocked    = False
+        self._daily_long_loss  = 0.0
+        self._daily_short_loss = 0.0
+
+    # ────────────────────────────────────────────────
     #  역방향 연속 캔들 카운트
     # ────────────────────────────────────────────────
     def _count_adverse_candles(self, symbol: str, trend: str) -> int:
@@ -278,9 +375,14 @@ class StrategyEngine:
     # ────────────────────────────────────────────────
     def _close(self, reason: str, exit_price: float = None):
         p = self.pt.position
+        if p is None:
+            return
+        trend, crash_short = p.trend, p.crash_short
         if exit_price is None:
             exit_price = self.api.get_price(p.symbol)
         self.pt.close_position(exit_price, reason)
+        last_pnl = self.pt.closed_trades[-1]["pnl"] if self.pt.closed_trades else 0.0
+        self._track_direction_loss(trend, crash_short, last_pnl)
         self._last_exit_time = time.time()
         self.state = BotState.IDLE
 
@@ -290,11 +392,20 @@ class StrategyEngine:
     def tick(self):
         now = time.time()
 
+        # 날짜 변경 시 방향별 손실 카운터 초기화
+        self._reset_daily_loss_if_needed()
+
         # ── 매 틱: BTC 가격 히스토리 업데이트 (시장충격 감지용) ──
         btc_shock_this_tick = self._update_btc_and_check_shock()
 
         # ── IDLE: 청산 후 즉시 or 정기 스캔 후 진입 ──
         if self.state == BotState.IDLE:
+            # ── 전면 매매 금지 체크 ──
+            if now < self._trading_pause_until:
+                remaining = (self._trading_pause_until - now) / 60
+                logger.debug(f"[전면매매금지] 잔여 {remaining:.1f}분 → 대기")
+                return
+
             # ── 급락 SHORT 모드: 빠른 스캔 후 SHORT 진입 ──
             if self._in_crash_mode:
                 if self._crash_retry_count > CRASH_MAX_RETRIES:
@@ -302,6 +413,9 @@ class StrategyEngine:
                     self._exit_crash_mode()
                 elif now >= self._market_shock_until:
                     logger.info("[급락모드] BTC 회복 감지 → 모드 종료")
+                    self._exit_crash_mode()
+                elif self._short_blocked:
+                    logger.warning("[SHORT차단] 일별 SHORT 손실 한도 초과 → 급락SHORT 건너뜀")
                     self._exit_crash_mode()
                 else:
                     self._enter_crash_short()
@@ -333,9 +447,24 @@ class StrategyEngine:
                 if blocked:
                     logger.info(f"차단 코인 제외: {blocked}")
 
-                # 차단 코인 제외하고 선택
+                # 방향 필터: BTC 4h 하락추세 → LONG 차단
+                btc_down = self._is_btc_downtrend_4h()
+                if btc_down:
+                    logger.info("[BTC4h하락추세] LONG 진입 차단 활성")
+                if self._long_blocked:
+                    logger.info("[LONG차단] 일별 LONG 손실 한도 초과 → LONG 진입 불가")
+                if self._short_blocked:
+                    logger.info("[SHORT차단] 일별 SHORT 손실 한도 초과 → SHORT 진입 불가")
+
+                # 차단 코인 + 방향 필터 적용 후 선택
                 candidates = self.scanner.scan()
-                coin = next((c for c in candidates if c["symbol"] not in blocked), None)
+                coin = next(
+                    (c for c in candidates
+                     if c["symbol"] not in blocked
+                     and not (c["trend"] == "UP"   and (self._long_blocked or btc_down))
+                     and not (c["trend"] == "DOWN" and self._short_blocked)),
+                    None
+                )
 
                 if coin:
                     self._enter(coin)
