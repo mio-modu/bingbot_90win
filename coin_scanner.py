@@ -29,9 +29,9 @@ VOLATILITY_MAX = 0.12    # ATR/가격 최대 12% (너무 극단적인 코인 제
 
 # ── 현재 변동성 필터 ──────────────────────────────────────
 # 1h 캔들 기준 (고가-저가)/종가 평균 → 최근 6시간 활성도
-RECENT_VOL_MIN_1H = 0.008  # 최근 1h 평균 변동폭 최소 0.8%
+RECENT_VOL_MIN_1H = 0.005  # 최근 1h 평균 변동폭 최소 0.5% (시장 조용할 때 대응 완화)
 # 15m 캔들 기준 (고가-저가)/종가 평균 → 지금 이 순간 활성도
-RECENT_VOL_MIN_15M = 0.004 # 최근 15m 평균 변동폭 최소 0.4% (횡보 즉시 차단)
+RECENT_VOL_MIN_15M = 0.002 # 최근 15m 평균 변동폭 최소 0.2% (시장 조용할 때 대응 완화)
 
 # ── 최소 점수 기준 ────────────────────────────────────────
 MIN_SCORE = 0.01  # ADX·일관성 보너스 추가로 점수 스케일 낮아짐 → 기준 하향 (0.05→0.01)
@@ -59,6 +59,7 @@ BLACKLIST = {
     "ZEC-USDT",           # 4단계 최대손실손절 (-$409)
     "NCSKMRVL2USD-USDT",  # 4단계 최대손실손절 (-$270)
     "ARB-USDT",           # 4단계 최대손실손절 (-$268)
+    "TAO-USDT",           # 5단계 마지막결전청산 3회 반복 (-$55, -$124, -$169) 누적 -$349
 }
 
 
@@ -188,35 +189,48 @@ class CoinScanner:
         tickers = self.api.get_all_tickers()
         candidates = []
 
+        # 필터별 탈락 카운터
+        _f = {
+            "거래량부족": 0, "거래량초과": 0, "대형코인": 0,
+            "블랙리스트": 0, "키워드제외": 0, "과열": 0,
+            "데이터부족": 0, "ATR범위외": 0, "SIDEWAYS": 0,
+            "1h역행": 0, "1h변동성": 0, "15m변동성": 0,
+        }
+
         for t in tickers:
             symbol = t.get("symbol", "")
             if not symbol.endswith("-USDT"):
                 continue
 
             # ── 1. 거래량 필터 (최소~최대 범위) ──────────
-            # 너무 작으면 유동성 부족, 너무 크면 움직임 둔함
             volume_usdt = float(t.get("quoteVolume", 0))
             if volume_usdt < MIN_VOLUME_USDT:
+                _f["거래량부족"] += 1
                 continue
             if volume_usdt > MAX_VOLUME_USDT:
+                _f["거래량초과"] += 1
                 logger.debug(f"{symbol} 거래량 초과 제외: ${volume_usdt/1e6:.0f}M")
                 continue
 
-            # ── 대형 코인 제외 (유통량 과다 → 둔한 움직임) ─
+            # ── 대형 코인 제외 ─────────────────────────
             if symbol in EXCLUDE_LARGE_CAPS:
+                _f["대형코인"] += 1
                 continue
 
-            # ── 블랙리스트 제외 (반복 고단계 손절 코인) ──
+            # ── 블랙리스트 제외 ────────────────────────
             if symbol in BLACKLIST:
+                _f["블랙리스트"] += 1
                 continue
 
             # ── 지수·원자재 추종 상품 제외 ───────────────
             if any(kw in symbol for kw in EXCLUDE_KEYWORDS):
+                _f["키워드제외"] += 1
                 continue
 
             # ── 5. 과열 필터 (24h 등락률) ───────────────
             change_24h = float(t.get("priceChangePercent", 0)) / 100
             if abs(change_24h) > MAX_24H_CHANGE:
+                _f["과열"] += 1
                 logger.debug(f"{symbol} 과열 제외: 24h {change_24h:.1%}")
                 continue
 
@@ -224,6 +238,7 @@ class CoinScanner:
                 # 일봉 캔들
                 daily = self.api.get_klines(symbol, "1d", limit=max(MA_PERIOD + 5, 35))
                 if len(daily) < MA_PERIOD + 1:
+                    _f["데이터부족"] += 1
                     continue
 
                 closes_d = [_kline_val(k, "close", 4) for k in daily]
@@ -231,6 +246,7 @@ class CoinScanner:
                 # ── 2. 변동성 필터 (ATR 기반) ────────────
                 atr_ratio = calc_atr_ratio(daily)
                 if atr_ratio < VOLATILITY_MIN or atr_ratio > VOLATILITY_MAX:
+                    _f["ATR범위외"] += 1
                     logger.debug(
                         f"{symbol} 변동성 범위 외: ATR비율 {atr_ratio:.3f}"
                     )
@@ -240,10 +256,10 @@ class CoinScanner:
                 slope_d = calc_ma_slope(closes_d, MA_PERIOD)
                 trend   = get_trend(slope_d)
                 if trend == "SIDEWAYS":
+                    _f["SIDEWAYS"] += 1
                     continue
 
-                # ── 3.5. ADX 추세 강도 계산 (하드필터 아님 → 점수 보너스로만 사용)
-                # 하드필터로 쓰면 시장 횡보 시 진입 가능 코인 0개 될 수 있음
+                # ── 3.5. ADX 추세 강도 계산 (점수 보너스만)
                 adx = calc_adx(daily)
 
                 # ── 4. 단기 트렌드 정렬 (4h + 1h) ──────────
@@ -281,12 +297,13 @@ class CoinScanner:
                     if recent_ranges:
                         recent_vol_1h = float(np.mean(recent_ranges))
                         if recent_vol_1h < RECENT_VOL_MIN_1H:
+                            _f["1h변동성"] += 1
                             logger.debug(
                                 f"{symbol} 1h 횡보 제외: {recent_vol_1h:.4f} < {RECENT_VOL_MIN_1H}"
                             )
                             continue
 
-                # ── 현재 변동성 체크 2: 최근 8개 15m 캔들 (지금 이 순간) ──
+                # ── 현재 변동성 체크 2: 최근 8개 15m 캔들 ──
                 try:
                     m15 = self.api.get_klines(symbol, "15m", limit=8)
                     if len(m15) >= 6:
@@ -300,6 +317,7 @@ class CoinScanner:
                         if ranges_15m:
                             recent_vol_15m = float(np.mean(ranges_15m))
                             if recent_vol_15m < RECENT_VOL_MIN_15M:
+                                _f["15m변동성"] += 1
                                 logger.debug(
                                     f"{symbol} 15m 횡보 제외: {recent_vol_15m:.4f} < {RECENT_VOL_MIN_15M}"
                                 )
@@ -316,6 +334,7 @@ class CoinScanner:
 
                 # 1h 역행이면 지금 이 흐름 아님 → 제외
                 if trend_1h != "SIDEWAYS" and trend_1h != trend:
+                    _f["1h역행"] += 1
                     logger.debug(f"{symbol} 1h 역행 제외: 일봉={trend} 1h={trend_1h}")
                     continue
 
@@ -381,6 +400,10 @@ class CoinScanner:
             f"→ 점수기준({MIN_SCORE}) 통과 {len(qualified)}개 "
             f"→ 상위 {len(top)}개"
         )
+        # 필터별 탈락 통계 (조건 통과 0개일 때 원인 파악용)
+        if len(candidates) == 0:
+            stats = " / ".join(f"{k}:{v}" for k, v in _f.items() if v > 0)
+            logger.info(f"  [필터통계] {stats if stats else '전부통과(점수미달)'}")
 
         if not top:
             logger.info(f"  ※ 최소 점수({MIN_SCORE}) 충족 코인 없음 → 진입 대기")

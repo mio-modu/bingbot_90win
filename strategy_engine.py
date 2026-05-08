@@ -529,18 +529,52 @@ class StrategyEngine:
                     p.avg_down_step <= config.MAX_DCA_STAGES and
                     p.step_enter_time > 0):
                 step_age_min = (now - p.step_enter_time) / 60
+
+                # ── 단계 타임아웃: 2단계 이상, 손실 중 N분 초과 → 청산 ──
+                # 1단계는 무조건 2단계로 진행하므로 타임아웃 미적용
+                if not is_last_stage and p.avg_down_step >= 2 and net_pnl < 0:
+                    timeout_min = config.SIDEWAYS_DCA_STAGE_TIMEOUT_MIN.get(
+                        p.avg_down_step, 60
+                    )
+                    if step_age_min >= timeout_min:
+                        symbol = p.symbol
+                        stage  = p.avg_down_step
+                        logger.warning(
+                            f"[단계타임아웃] {symbol} | {stage}단계 "
+                            f"{step_age_min:.0f}분 손실 중(${net_pnl:+.2f}) → 청산"
+                        )
+                        self._close("단계타임아웃청산")
+                        self._last_scan_time = 0
+                        # 2단계 이상 타임아웃 손절 → 24시간 차단 (반복 손실 방지)
+                        block_until = now + 24 * 3600
+                        self._blocked_symbols[symbol] = block_until
+                        self._save_engine_state()
+                        logger.warning(
+                            f"[손절코인차단] {symbol} | {stage}단계 단계타임아웃청산 → 24시간 차단"
+                        )
+                        return
+
                 wait_min = (SIDEWAYS_LAST_STAGE_TIMEOUT_MIN if is_last_stage
                             else SIDEWAYS_DCA_WAIT_PER_STEP.get(p.avg_down_step, 10))
 
                 if step_age_min >= wait_min:
                     # ── 마지막 단계: 청산 ──────────────────────────
                     if is_last_stage:
+                        symbol = p.symbol
+                        stage  = p.avg_down_step
                         logger.warning(
-                            f"[마지막결전] {p.symbol} | {p.avg_down_step}단계 "
+                            f"[마지막결전] {symbol} | {stage}단계 "
                             f"{step_age_min:.0f}분 횡보 → 손절 청산 | 순손익 ${net_pnl:+.2f}"
                         )
                         self._close("마지막결전청산")
                         self._last_scan_time = 0
+                        # 최종단계 손절 코인 48시간 차단 (TAO처럼 반복 손실 방지)
+                        block_until = now + 48 * 3600
+                        self._blocked_symbols[symbol] = block_until
+                        self._save_engine_state()
+                        logger.warning(
+                            f"[손절코인차단] {symbol} | {stage}단계 마지막결전청산 → 48시간 차단"
+                        )
                         return
 
                     # ── 중간 단계: 다음 단계 DCA ─────────────────
@@ -549,12 +583,16 @@ class StrategyEngine:
                     going_to_step4 = (p.avg_down_step == 3)
                     going_to_step5 = (p.avg_down_step == 4)
                     is_final_stages = going_to_step4 or going_to_step5
+                    # 1→2단계는 무조건 진행 (추세 체크 비활성화)
                     candle_limit   = (config.ADVERSE_CANDLE_BLOCK_STEP4
-                                      if is_final_stages else ADVERSE_CANDLE_BLOCK)
+                                      if is_final_stages
+                                      else ADVERSE_CANDLE_BLOCK  # =9, 사실상 비활성
+                                      if p.avg_down_step == 1
+                                      else config.SIDEWAYS_DCA_ADVERSE_CANDLES)
                     if adverse_candles >= candle_limit:
                         logger.info(
-                            f"[횡보DCA차단] {p.symbol} | 역방향 15m 캔들 {adverse_candles}개 연속 "
-                            f"→ 횡보DCA 보류 (추세전환 가능성)"
+                            f"[횡보DCA추세차단] {p.symbol} | 역방향 15m 캔들 {adverse_candles}개 연속 "
+                            f"→ 추세 진행 중, 횡보DCA 보류"
                         )
                         return
                     if is_final_stages and self._is_btc_declining():
@@ -573,6 +611,15 @@ class StrategyEngine:
                             f"{config.DCA_STEP5_DAILY_MAX}회 한도 초과 → 보류"
                         )
                         return
+                    if p.avg_down_step >= 2:
+                        max_loss_thr = -p.total_invested * config.SIDEWAYS_DCA_MAX_LOSS_RATIO
+                        if net_pnl <= max_loss_thr:
+                            logger.info(
+                                f"[횡보DCA건너뜀] {p.symbol} | 순손익 ${net_pnl:+.2f} ≤ "
+                                f"${max_loss_thr:.0f} (투입금 ${p.total_invested:.0f} × "
+                                f"{config.SIDEWAYS_DCA_MAX_LOSS_RATIO:.1%}) → 손실 중 강제투입 보류"
+                            )
+                            return
                     next_amt = p.next_avg_down_amount()
                     logger.info(
                         f"[횡보DCA] {p.symbol} | {p.avg_down_step}단계 "
