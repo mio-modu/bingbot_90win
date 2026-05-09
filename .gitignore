@@ -1,0 +1,19 @@
+# 환경변수 (API 키 포함 — 절대 커밋하지 않음)
+.env
+
+# 파이썬 캐시
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 런타임 상태 파일 (포지션/잔고 정보)
+state.json
+state.json.bak
+engine_state.json
+
+# 로그
+*.log
+
+# IDE
+.vscode/
+.idea/
