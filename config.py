@@ -15,8 +15,8 @@ BASE_URL   = "https://open-api.bingx.com"
 #  시드는 항상 "전체 잔액 × SEED_RATIO" 로 결정됨.
 #  거래 청산마다 BingX 실제 잔고를 조회해 자동 재계산.
 # ────────────────────────────────────────────────
-TOTAL_CAPITAL        = 242.0   # 초기 자본 (USD) — 재시작 기준값
-INITIAL_POSITION_USD = 14.5    # 초기 시드 ($242 × 6%)
+TOTAL_CAPITAL        = 245.0   # 초기 자본 (USD) — 재시작 기준값
+INITIAL_POSITION_USD = 14.5    # 초기 시드 ($245 × 6%)
 LEVERAGE             = 10      # 레버리지 10배
 SEED_RATIO           = 0.06    # 시드 비율: 전체 잔액의 6%
 
@@ -30,7 +30,7 @@ SLIPPAGE_RATE   = 0.0005   # 슬리피지 시뮬레이션 0.05%
 #  익절 설정
 # ────────────────────────────────────────────────
 TAKE_PROFIT_PCT = 0.01     # 포지션 기준 최소 +1%
-MIN_PROFIT_USD  = 1.10     # 최소 순수익 (seed × 7.5% ≈ $14.5 × 0.075)
+MIN_PROFIT_USD  = 1.10     # 최소 순수익 ($245 × 6% × 7.5%)
 
 # ────────────────────────────────────────────────
 #  트레일링 익절
@@ -65,7 +65,7 @@ AVG_DOWN_STEP3_TRIGGER = -0.08
 AVG_DOWN_STEP4_TRIGGER = -0.12
 AVG_DOWN_STEP5_TRIGGER = -0.12
 MAX_DCA_STAGES         = 3
-MAX_TOTAL_POSITION     = 121.0  # 하드캡 (자본의 50%)
+MAX_TOTAL_POSITION     = 122.5  # 하드캡 (자본의 50%)
 
 # ────────────────────────────────────────────────
 #  손절 설정
@@ -75,10 +75,10 @@ MAX_TOTAL_POSITION     = 121.0  # 하드캡 (자본의 50%)
 #  DCA_STEP4_NET_LOSS_TRIGGER= 잔액 × 9%  (SEED_RATIO × 1.5)
 #  DCA_STEP5_NET_LOSS_TRIGGER= 잔액 × 21% (SEED_RATIO × 3.5)
 # ────────────────────────────────────────────────
-MAX_NET_LOSS_USD        = -55.7  # 최대 손실 ($242 × 23%)
+MAX_NET_LOSS_USD        = -56.4  # 최대 손실 ($245 × 23%)
 
-DCA_STEP4_NET_LOSS_TRIGGER = -21.8  # $242 × 9%
-DCA_STEP5_NET_LOSS_TRIGGER = -50.8  # $242 × 21%
+DCA_STEP4_NET_LOSS_TRIGGER = -22.0  # $245 × 9%
+DCA_STEP5_NET_LOSS_TRIGGER = -51.4  # $245 × 21%
 
 ADVERSE_CANDLE_BLOCK_STEP4 = 2
 DCA_STEP4_DAILY_MAX        = 2
@@ -125,7 +125,7 @@ TOP_N_COINS            = 5
 
 UPGRADE_SCAN_MIN       = 20
 UPGRADE_SCORE_MULT     = 2.5
-UPGRADE_MAX_LOSS_USD   = -1.10
+UPGRADE_MAX_LOSS_USD   = -1.10  # $245 × 6% × 7.5%
 
 FLAT_TIMEOUT_MIN   = 12
 FLAT_THRESHOLD_USD = 0.10
@@ -139,7 +139,7 @@ SIDEWAYS_LAST_STAGE_TIMEOUT_MIN = 20
 SIDEWAYS_DCA_MIN_STEP  = 1
 SIDEWAYS_BLOCK_MIN     = 120
 SIDEWAYS_DCA_TP_PCT    = 0.025
-SIDEWAYS_DCA_MIN_NET   = 1.10
+SIDEWAYS_DCA_MIN_NET   = 1.10  # $245 × 6% × 7.5%
 SIDEWAYS_DCA_MAX_LOSS_RATIO    = 0.125
 SIDEWAYS_DCA_ADVERSE_CANDLES   = 2
 SIDEWAYS_DCA_STAGE_TIMEOUT_MIN = {1: 60, 2: 45, 3: 30, 4: 20}
