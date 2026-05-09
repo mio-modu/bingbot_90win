@@ -164,3 +164,31 @@ class BingXAPI:
                     float(p.get("positionAmt", 0)) > 0):
                 return p
         return None
+
+    # ────────────────────────────────────────────────
+    #  펀딩피
+    # ────────────────────────────────────────────────
+    def get_funding_rate(self, symbol: str) -> float:
+        """현재 펀딩비율 반환 (8시간 단위). 양수=롱 지불, 음수=롱 수취"""
+        try:
+            data = self._get("/openApi/swap/v2/quote/premiumIndex", {"symbol": symbol})
+            rate = data.get("data", {})
+            if isinstance(rate, list) and rate:
+                rate = rate[0]
+            return float(rate.get("lastFundingRate", 0))
+        except Exception:
+            return 0.0
+
+    def get_total_balance(self) -> float:
+        """총 지갑 잔고 (사용 가능 + 포지션 증거금 합계)"""
+        try:
+            data = self._get("/openApi/swap/v2/user/balance")
+            balance = data.get("data", {}).get("balance", {})
+            if isinstance(balance, dict):
+                return float(balance.get("balance", 0))
+            for asset in balance:
+                if asset.get("asset") == "USDT":
+                    return float(asset.get("balance", 0))
+        except Exception:
+            pass
+        return 0.0

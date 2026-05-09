@@ -182,20 +182,21 @@ class Position:
     def is_trail_hit(self, price: float) -> bool:
         """
         트레일링 손절가 터치 여부.
-        trail_sl에서 청산 시 realized_pnl > 0 이어야만 유효
-        (수수료+슬리피지 포함 실제 수익이 나는 구간에서만 발동)
+        trail_sl에서 청산 시 realized_pnl >= MIN_PROFIT_USD 이어야만 유효.
+        - 단순 '수익 > 0' 체크는 $0.001 수준의 미세 수익도 발동시켜
+          BingX 실제 체결(펀딩피 + 슬리피지 오차)에서 빨간 거래로 기록되는 원인.
+        - MIN_PROFIT_USD 이상이 확보된 시점에만 청산해 실질 수익 보장.
         """
         if not self.trail_active or self.trail_sl == 0:
             return False
         if self.trend == "UP":
             if self.trail_sl <= self.avg_price:
-                return False   # 평균단가 아래 → 무조건 손실
+                return False
             if price > self.trail_sl:
-                return False   # 아직 trail_sl 미도달
-            # trail_sl에서 실제 청산 시 수익 여부 확인 (슬리피지 포함)
+                return False
             fill = self.trail_sl * (1 - config.SLIPPAGE_RATE)
-            if self.realized_pnl(fill) <= 0:
-                return False   # trail_sl이 손익분기선 미만 → 발동 보류
+            if self.realized_pnl(fill) < config.MIN_PROFIT_USD:
+                return False   # 최소 수익 미달 → 트레일 발동 보류
             return True
         else:
             if self.trail_sl >= self.avg_price:
@@ -203,7 +204,7 @@ class Position:
             if price < self.trail_sl:
                 return False
             fill = self.trail_sl * (1 + config.SLIPPAGE_RATE)
-            if self.realized_pnl(fill) <= 0:
+            if self.realized_pnl(fill) < config.MIN_PROFIT_USD:
                 return False
             return True
 
@@ -553,9 +554,9 @@ class PaperTrader:
         if p and p.is_trail_hit(price):
             use_dca_trail = p.avg_down_step >= config.DCA_TRAIL_STEP_THRESHOLD
             prefix = f"DCA{p.avg_down_step}트레일" if use_dca_trail else "트레일"
-            # 실제 청산가(trail_sl) 기준 realized_pnl로 익절/손절 판단
-            # (현재가가 trail_sl 아래로 떨어진 시점의 net_pnl은 음수일 수 있어 오레이블 발생)
-            exit_net = p.realized_pnl(p.trail_sl)
+            # 슬리피지 적용된 실제 체결가 기준으로 순손익 표시 (로그와 실제 기록 일치)
+            fill = _apply_slip(p.trail_sl, p.trend, entry=False)
+            exit_net = p.realized_pnl(fill)
             if exit_net >= 0:
                 return f"{prefix}익절(고점{p.peak_price:.4f}→SL{p.trail_sl:.4f}/순${exit_net:+.2f})"
             else:

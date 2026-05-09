@@ -46,6 +46,7 @@ class StrategyEngine:
         self.state   = BotState.IN_POSITION if self.pt.position else BotState.IDLE
         self._last_scan_time  = 0.0
         self._last_exit_time  = 0.0
+        self._last_funding_check_time = 0.0   # 펀딩비 체크 간격 (8시간 1회)
         self._current_coin_enter_time = (
             self.pt.position.open_time if self.pt.position else 0.0
         )
@@ -377,6 +378,28 @@ class StrategyEngine:
                 f"순손익: {pnl_pct:.2%}(${net_pnl:+.2f}) | "
                 f"투입: ${p.total_invested:.0f} | 단계: {p.avg_down_step}{trail_str}"
             )
+
+            # 펀딩비 체크 (4시간마다 1회 — 8시간 결제 전 경고)
+            funding_check_interval = 4 * 3600
+            if now - self._last_funding_check_time >= funding_check_interval:
+                self._last_funding_check_time = now
+                try:
+                    rate = self.api.get_funding_rate(p.symbol)
+                    notional = p.total_invested * config.LEVERAGE
+                    funding_cost_8h = abs(notional * rate)
+                    if abs(rate) >= 0.001:   # 0.1% 이상 고율 경고
+                        logger.warning(
+                            f"[펀딩비경고] {p.symbol} | 현재율 {rate:.4%}/8h | "
+                            f"추정비용 ${funding_cost_8h:.2f}/8h (노셔널 ${notional:.0f}) | "
+                            f"손익 ${net_pnl:+.2f} — 적극 익절 고려"
+                        )
+                    else:
+                        logger.info(
+                            f"[펀딩비] {p.symbol} | {rate:.4%}/8h | "
+                            f"추정 ${funding_cost_8h:.2f}/8h"
+                        )
+                except Exception as e:
+                    logger.debug(f"펀딩비 조회 실패: {e}")
 
             # 1. 급락 손절
             if self.pt.is_flash_crash():
