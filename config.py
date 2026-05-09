@@ -149,3 +149,9 @@ MAX_VOLUME_USDT        = 300_000_000
 
 MAIN_LOOP_INTERVAL_SEC = 10
 LOG_LEVEL              = "INFO"
+
+# ────────────────────────────────────────────────
+#  구출 DCA 설정
+# ────────────────────────────────────────────────
+RESCUE_DCA_MAX_LOSS_RATIO = 0.20   # 투입금 20% 이상 손실이면 구출 포기 → 손절
+RESCUE_DCA_TIMEOUT_MIN    = 15     # 구출 DCA 후 15분 내 회복 못하면 손절

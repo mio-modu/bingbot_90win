@@ -69,6 +69,10 @@ class Position:
     # 급락 SHORT 모드
     crash_short:     bool   = False  # BTC 충격 시 역방향 단타 여부
 
+    # 구출 DCA 상태
+    rescue_dca:        bool  = False  # 구출 DCA 투입 여부
+    rescue_enter_time: float = 0.0   # 구출 DCA 진입 시각
+
     # 급락 감지용 가격 히스토리: [timestamp, price, volume]
     price_hist:      list   = field(default_factory=list)
     low_vol_start:   float  = 0.0
@@ -312,7 +316,9 @@ class PaperTrader:
                 "initial_invest":  p.initial_invest,
                 "sideways_dca":    p.sideways_dca,
                 "step_enter_time": p.step_enter_time,
-                "crash_short":     p.crash_short,
+                "crash_short":       p.crash_short,
+                "rescue_dca":        p.rescue_dca,
+                "rescue_enter_time": p.rescue_enter_time,
             }
         data = {
             "total_capital": self.total_capital,
@@ -367,7 +373,9 @@ class PaperTrader:
                         initial_invest  = float(pd.get("initial_invest", 0.0)),
                         sideways_dca    = bool(pd.get("sideways_dca", False)),
                         step_enter_time = float(pd.get("step_enter_time", 0.0)),
-                        crash_short     = bool(pd.get("crash_short", False)),
+                        crash_short        = bool(pd.get("crash_short", False)),
+                        rescue_dca         = bool(pd.get("rescue_dca", False)),
+                        rescue_enter_time  = float(pd.get("rescue_enter_time", 0.0)),
                     )
                     # initial_invest 마이그레이션
                     # (구버전 state.json에 필드 없을 때 → 현재 config 시드로 설정)
@@ -633,6 +641,24 @@ class PaperTrader:
             return
         p.apply_avg_down(price, add_usd)
         p.sideways_dca = True   # TP 조건을 단순 +1%로 전환
+        self.save_state()
+
+    def execute_rescue_dca(self, price: float, amount: float):
+        """구출 DCA: 타임아웃 청산 대신 추가 투입해 본전/익절 유도"""
+        p = self.position
+        if not p:
+            return
+        add_usd = min(amount, p.max_position - p.total_invested)
+        if add_usd < 1.0:
+            return
+        p.apply_avg_down(price, add_usd)
+        p.rescue_dca        = True
+        p.rescue_enter_time = time.time()
+        logger.info(
+            f"[구출DCA] {p.symbol} | 추가 ${add_usd:.0f} | "
+            f"평단 {p.avg_price:.6f} | 총투입 ${p.total_invested:.0f} | "
+            f"{config.RESCUE_DCA_TIMEOUT_MIN}분 내 회복 목표"
+        )
         self.save_state()
 
     # ── 급락 감지 ────────────────────────────────────────────

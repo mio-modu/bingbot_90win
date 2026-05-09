@@ -173,6 +173,22 @@ class BingxTrader(PaperTrader):
         self.save_state()
 
     # ────────────────────────────────────────────────
+    #  오버라이드: 구출 DCA
+    # ────────────────────────────────────────────────
+    def execute_rescue_dca(self, price: float, amount: float):
+        p = self.position
+        if not p:
+            return
+        add_usd = min(amount, p.max_position - p.total_invested)
+        if add_usd < 1.0:
+            return
+        ok = self._real_add(p.symbol, p.trend, add_usd)
+        if not ok:
+            logger.error(f"[경고] {p.symbol} 구출DCA 실제주문 실패 — 건너뜀")
+            return
+        super().execute_rescue_dca(price, amount)
+
+    # ────────────────────────────────────────────────
     #  자본 동기화: 청산 후 BingX 실제 잔고 반영
     # ────────────────────────────────────────────────
     def sync_capital_from_api(self):

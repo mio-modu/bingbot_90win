@@ -463,6 +463,33 @@ class StrategyEngine:
                         self._exit_crash_mode()
                     return
 
+            # 2.9. 구출 DCA 모드: 본전 이상이면 즉시 익절, 타임아웃이면 손절
+            if p.rescue_dca:
+                rescue_age_min = (now - p.rescue_enter_time) / 60
+                if net_pnl >= 0:
+                    logger.info(
+                        f"[구출DCA익절] {p.symbol} | 투입 후 {rescue_age_min:.1f}분 만에 회복 "
+                        f"| 순손익 ${net_pnl:+.2f} → 청산"
+                    )
+                    self._close("구출DCA익절")
+                    self._last_scan_time = 0
+                    return
+                if rescue_age_min >= config.RESCUE_DCA_TIMEOUT_MIN:
+                    symbol_r = p.symbol
+                    logger.warning(
+                        f"[구출DCA미회복] {p.symbol} | {rescue_age_min:.1f}분 경과 미회복 "
+                        f"| 순손익 ${net_pnl:+.2f} → 손절 청산"
+                    )
+                    self._close("구출DCA미회복청산")
+                    self._last_scan_time = 0
+                    block_until = now + 24 * 3600
+                    self._blocked_symbols[symbol_r] = block_until
+                    self._save_engine_state()
+                    logger.warning(
+                        f"[손절코인차단] {symbol_r} | 구출DCA미회복 → 24시간 차단"
+                    )
+                    return
+
             # 3. 익절 (일반 or 트레일)
             if self.pt.should_take_profit(price):
                 reason       = self.pt.take_profit_reason(price)
@@ -563,6 +590,19 @@ class StrategyEngine:
                     if step_age_min >= timeout_min:
                         symbol = p.symbol
                         stage  = p.avg_down_step
+                        # 구출 DCA: 큰 손실 아니고 DCA 여력 있으면 청산 대신 추가 투입
+                        rescue_max_loss = -p.total_invested * config.RESCUE_DCA_MAX_LOSS_RATIO
+                        if (not p.rescue_dca and net_pnl > rescue_max_loss
+                                and p.avg_down_step < config.MAX_DCA_STAGES):
+                            add_usd = p.next_avg_down_amount()
+                            add_usd = min(add_usd, config.MAX_TOTAL_POSITION - p.total_invested)
+                            if add_usd >= 1.0:
+                                logger.warning(
+                                    f"[구출DCA] {symbol} | {stage}단계 타임아웃(${net_pnl:+.2f}) "
+                                    f"→ 청산 대신 +${add_usd:.0f} 구출DCA 투입"
+                                )
+                                self.pt.execute_rescue_dca(price, add_usd)
+                                return
                         logger.warning(
                             f"[단계타임아웃] {symbol} | {stage}단계 "
                             f"{step_age_min:.0f}분 손실 중(${net_pnl:+.2f}) → 청산"
@@ -582,10 +622,24 @@ class StrategyEngine:
                             else SIDEWAYS_DCA_WAIT_PER_STEP.get(p.avg_down_step, 10))
 
                 if step_age_min >= wait_min:
-                    # ── 마지막 단계: 청산 ──────────────────────────
+                    # ── 마지막 단계: 청산 (가능하면 구출 DCA 먼저 시도) ──
                     if is_last_stage:
                         symbol = p.symbol
                         stage  = p.avg_down_step
+                        # 구출 DCA: 큰 손실 아니고 추가 투입 여력 있으면 초기 시드 추가
+                        rescue_max_loss = -p.total_invested * config.RESCUE_DCA_MAX_LOSS_RATIO
+                        if not p.rescue_dca and net_pnl > rescue_max_loss:
+                            rescue_amount = min(
+                                p.initial_invest,
+                                config.MAX_TOTAL_POSITION - p.total_invested
+                            )
+                            if rescue_amount >= 1.0:
+                                logger.warning(
+                                    f"[구출DCA] {symbol} | {stage}단계 횡보(${net_pnl:+.2f}) "
+                                    f"→ 청산 대신 초기시드 +${rescue_amount:.0f} 구출DCA 투입"
+                                )
+                                self.pt.execute_rescue_dca(price, rescue_amount)
+                                return
                         logger.warning(
                             f"[마지막결전] {symbol} | {stage}단계 "
                             f"{step_age_min:.0f}분 횡보 → 손절 청산 | 순손익 ${net_pnl:+.2f}"
