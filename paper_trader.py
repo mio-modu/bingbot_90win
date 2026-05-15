@@ -26,6 +26,7 @@ import os
 import time
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -310,12 +311,15 @@ def _apply_slip(price: float, trend: str, entry: bool) -> float:
 
 class PaperTrader:
     def __init__(self):
-        self.total_capital: float = config.TOTAL_CAPITAL
+        self.total_capital:      float = config.TOTAL_CAPITAL
         self.position: Optional[Position] = None
-        self.total_pnl:  float = 0.0
-        self.win_count:  int   = 0
-        self.loss_count: int   = 0
-        self.closed_trades: list = []
+        self.total_pnl:          float = 0.0
+        self.win_count:          int   = 0
+        self.loss_count:         int   = 0
+        self.closed_trades:      list  = []
+        self.total_withdrawn:    float = 0.0
+        self.withdrawal_count:   int   = 0
+        self.withdrawal_history: list  = []
         self._load_state()
 
     # ── 상태 저장 / 복원 ─────────────────────────────────────
@@ -350,11 +354,14 @@ class PaperTrader:
                 "capital_at_open":  p.capital_at_open,
             }
         data = {
-            "total_pnl":     self.total_pnl,
-            "win_count":     self.win_count,
-            "loss_count":    self.loss_count,
-            "closed_trades": self.closed_trades[-200:],
-            "position":      pos_data,
+            "total_pnl":          self.total_pnl,
+            "win_count":          self.win_count,
+            "loss_count":         self.loss_count,
+            "closed_trades":      self.closed_trades[-200:],
+            "position":           pos_data,
+            "total_withdrawn":    round(self.total_withdrawn, 4),
+            "withdrawal_count":   self.withdrawal_count,
+            "withdrawal_history": self.withdrawal_history[-100:],
         }
         tmp = STATE_FILE + ".tmp"
         bak = STATE_FILE + ".bak"
@@ -374,10 +381,13 @@ class PaperTrader:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.total_pnl     = float(data.get("total_pnl", 0.0))
-                self.win_count     = int(data.get("win_count", 0))
-                self.loss_count    = int(data.get("loss_count", 0))
-                self.closed_trades = list(data.get("closed_trades", []))
+                self.total_pnl          = float(data.get("total_pnl", 0.0))
+                self.win_count          = int(data.get("win_count", 0))
+                self.loss_count         = int(data.get("loss_count", 0))
+                self.closed_trades      = list(data.get("closed_trades", []))
+                self.total_withdrawn    = float(data.get("total_withdrawn", 0.0))
+                self.withdrawal_count   = int(data.get("withdrawal_count", 0))
+                self.withdrawal_history = list(data.get("withdrawal_history", []))
                 pd = data.get("position")
                 if pd:
                     p = Position(
@@ -457,6 +467,13 @@ class PaperTrader:
                                 / config.DYNAMIC_SEED_STEP_CAPITAL))
         return config.INITIAL_POSITION_USD + increments * config.DYNAMIC_SEED_STEP_USD
 
+    def _get_max_loss_usd(self) -> float:
+        """동적 손절 한도: -min(시드 × SEED_MULT, CEILING)
+        자본 $1000→$240 / $1600→$400 / $2250+→$500(천장)"""
+        seed = self._get_initial_position_usd()
+        cap  = min(seed * config.MAX_NET_LOSS_SEED_MULT, config.MAX_NET_LOSS_CEILING)
+        return -cap
+
     def open_position(self, symbol: str, trend: str, raw_price: float,
                       invest_override: float = None,
                       crash_short: bool = False) -> Position:
@@ -535,7 +552,34 @@ class PaperTrader:
             f"순손익: ${pnl:+.4f} | 누적: ${self.total_pnl:+.2f}"
         )
         self.save_state()
+        self._check_auto_withdraw()
         return trade
+
+    def _check_auto_withdraw(self):
+        """확정 자본이 출금 기준선 이상이면 자동 출금 시뮬레이션"""
+        if not config.AUTO_WITHDRAW_ENABLED:
+            return
+        confirmed = self.total_capital + self.total_pnl
+        if confirmed < config.AUTO_WITHDRAW_THRESHOLD:
+            return
+        withdraw_amt = confirmed - config.AUTO_WITHDRAW_BASE
+        self.total_pnl    -= withdraw_amt
+        self.total_withdrawn  += withdraw_amt
+        self.withdrawal_count += 1
+        entry = {
+            "no":     self.withdrawal_count,
+            "time":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "amount": round(withdraw_amt, 2),
+            "total":  round(self.total_withdrawn, 2),
+        }
+        self.withdrawal_history.append(entry)
+        logger.info(
+            f"[자동출금] #{self.withdrawal_count}회 | "
+            f"출금: ${withdraw_amt:+.2f} | "
+            f"누적 출금: ${self.total_withdrawn:.2f} | "
+            f"잔여 확정 자본: ${self.total_capital + self.total_pnl:.2f}"
+        )
+        self.save_state()
 
     # ── 트레일링 업데이트 ────────────────────────────────────
 
@@ -729,14 +773,15 @@ class PaperTrader:
     # ── 최대 손실 한도 손절 ──────────────────────────────────
 
     def is_max_loss_stop(self, price: float) -> bool:
-        """단계 무관 순손익이 MAX_NET_LOSS_USD 이하면 즉시 손절"""
+        """단계 무관 순손익이 동적 손절 한도 이하면 즉시 손절"""
         p = self.position
         if not p:
             return False
+        threshold = self._get_max_loss_usd()
         net = p.net_pnl(price)
-        if net <= config.MAX_NET_LOSS_USD:
+        if net <= threshold:
             logger.warning(
-                f"[최대손실손절] {p.symbol} | 순손익 ${net:.2f} ≤ ${config.MAX_NET_LOSS_USD:.0f} "
+                f"[최대손실손절] {p.symbol} | 순손익 ${net:.2f} ≤ ${threshold:.0f} "
                 f"→ 즉시 손절 (투입 ${p.total_invested:.0f} / {p.avg_down_step}단계)"
             )
             return True
@@ -807,13 +852,15 @@ class PaperTrader:
         total    = self.win_count + self.loss_count
         win_rate = (self.win_count / total * 100) if total else 0.0
         status = {
-            "current_capital": round(self.total_capital + self.total_pnl, 2),
-            "total_pnl":       round(self.total_pnl, 2),
-            "total_trades":    total,
-            "win_count":       self.win_count,
-            "loss_count":      self.loss_count,
-            "win_rate":        round(win_rate, 1),
-            "position":        None,
+            "current_capital":  round(self.total_capital + self.total_pnl, 2),
+            "total_pnl":        round(self.total_pnl, 2),
+            "total_trades":     total,
+            "win_count":        self.win_count,
+            "loss_count":       self.loss_count,
+            "win_rate":         round(win_rate, 1),
+            "total_withdrawn":  round(self.total_withdrawn, 2),
+            "withdrawal_count": self.withdrawal_count,
+            "position":         None,
         }
         if self.position and current_price > 0:
             p = self.position
@@ -845,6 +892,8 @@ class PaperTrader:
         logger.info(sep)
         logger.info(f"  현재 자본:     ${s['current_capital']:.2f}")
         logger.info(f"  총 순손익:     ${s['total_pnl']:+.2f}")
+        if s['withdrawal_count'] > 0:
+            logger.info(f"  총 출금:       ${s['total_withdrawn']:.2f} ({s['withdrawal_count']}회)")
         logger.info(f"  총 거래:       {s['total_trades']}회")
         logger.info(f"  익절/손절:     {s['win_count']}W / {s['loss_count']}L")
         logger.info(f"  승률:          {s['win_rate']}%")

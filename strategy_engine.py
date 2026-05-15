@@ -52,6 +52,10 @@ class StrategyEngine:
         )
         # 횡보/교체로 차단된 코인: {symbol: 차단해제_timestamp}
         self._blocked_symbols: dict = {}
+        # 연속 익절 쿨다운
+        self._consec_wins: dict = {}          # {symbol: 연속익절횟수}
+        self._consec_win_blocked: dict = {}   # {symbol: 차단해제_timestamp}
+        self._last_closed_symbol: str = ""    # 직전 청산 코인 (연속 체인 판별용)
         # 포지션 중 업그레이드 스캔
         self._last_upgrade_scan_time = 0.0
         self._current_coin_score: float = 0.0  # 진입 시 코인 점수 저장
@@ -85,11 +89,15 @@ class StrategyEngine:
     # ────────────────────────────────────────────────
     def _save_engine_state(self):
         now = time.time()
-        # 이미 만료된 항목 제외하고 저장
-        active = {s: t for s, t in self._blocked_symbols.items() if t > now}
+        active    = {s: t for s, t in self._blocked_symbols.items() if t > now}
+        cw_active = {s: t for s, t in self._consec_win_blocked.items() if t > now}
         try:
             with open(ENGINE_STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump({"blocked_symbols": active}, f, ensure_ascii=False, indent=2)
+                json.dump({
+                    "blocked_symbols":   active,
+                    "consec_wins":       self._consec_wins,
+                    "consec_win_blocked": cw_active,
+                }, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"[engine_state] 저장 실패: {e}")
 
@@ -105,12 +113,92 @@ class StrategyEngine:
                 for s, t in data.get("blocked_symbols", {}).items()
                 if float(t) > now
             }
+            self._consec_wins = data.get("consec_wins", {})
+            self._consec_win_blocked = {
+                s: float(t)
+                for s, t in data.get("consec_win_blocked", {}).items()
+                if float(t) > now
+            }
             if self._blocked_symbols:
                 remaining = {s: round((t - now) / 60, 1)
                              for s, t in self._blocked_symbols.items()}
                 logger.info(f"[engine_state] 차단 코인 복원: {remaining} (분 남음)")
+            if self._consec_win_blocked:
+                remaining = {s: round((t - now) / 60, 1)
+                             for s, t in self._consec_win_blocked.items()}
+                logger.info(f"[연속익절차단] 복원: {remaining} (분 남음)")
         except Exception as e:
             logger.warning(f"[engine_state] 로드 실패: {e}")
+
+    # ────────────────────────────────────────────────
+    #  연속 익절 쿨다운 관리
+    # ────────────────────────────────────────────────
+    def _record_win_streak(self, symbol: str, is_win: bool):
+        """익절/손절 후 연속 익절 카운터를 갱신하고 쿨다운을 적용한다.
+        같은 코인을 연속으로 거래할 때만 카운트. 다른 코인이 중간에 끼면 체인 끊김.
+        예) A익절→A익절→A익절 = 3연속 / A익절→B익절→A익절 = A는 1연속(체인 끊김)
+        """
+        # 직전 거래 코인이 다르면 이 코인의 연속 체인 끊김 → 카운터 초기화
+        if self._last_closed_symbol and self._last_closed_symbol != symbol:
+            if symbol in self._consec_wins:
+                prev = self._consec_wins.pop(symbol)
+                logger.info(
+                    f"[연속익절끊김] {symbol} | 직전 코인 {self._last_closed_symbol} "
+                    f"(다른 코인 거래) → {prev}연속 카운터 초기화"
+                )
+        self._last_closed_symbol = symbol
+
+        if is_win:
+            self._consec_wins[symbol] = self._consec_wins.get(symbol, 0) + 1
+            count = self._consec_wins[symbol]
+            logger.info(f"[연속익절] {symbol} {count}연속 익절 (동일 코인 연속)")
+            if count >= config.CONSEC_WIN_COOLDOWN_N:
+                block_until = time.time() + config.CONSEC_WIN_COOLDOWN_MIN * 60
+                self._consec_win_blocked[symbol] = block_until
+                self._save_engine_state()
+                logger.warning(
+                    f"[연속익절쿨다운] {symbol} {count}연속 익절 → "
+                    f"{config.CONSEC_WIN_COOLDOWN_MIN}분 재진입 차단"
+                )
+        else:
+            if symbol in self._consec_wins:
+                prev = self._consec_wins.pop(symbol)
+                logger.info(f"[연속익절초기화] {symbol} {prev}연속 → 손절로 초기화")
+            # 쿨다운도 해제 (손절 후 재진입 허용)
+            if symbol in self._consec_win_blocked:
+                del self._consec_win_blocked[symbol]
+            self._save_engine_state()
+
+    @property
+    def _all_blocked(self) -> set:
+        """현재 유효한 모든 차단 코인 집합 (손절차단 + 연속익절쿨다운)."""
+        now = time.time()
+        return (
+            {s for s, t in self._blocked_symbols.items() if t > now}
+            | {s for s, t in self._consec_win_blocked.items() if t > now}
+        )
+
+    def _check_momentum_cooled(self, candidate: dict, just_released: set) -> bool:
+        """
+        연속익절 쿨다운 해제 직후 코인의 단기 모멘텀 꺾임 여부 확인.
+        just_released에 없는 코인은 무조건 True(통과).
+        1h MA 기울기 절댓값이 CONSEC_WIN_REENTRY_SLOPE_MAX 이하일 때만 재진입 허용.
+        """
+        symbol = candidate["symbol"]
+        if symbol not in just_released:
+            return True
+        slope_1h = abs(candidate.get("slope_1h", 0.0))
+        if slope_1h > config.CONSEC_WIN_REENTRY_SLOPE_MAX:
+            logger.info(
+                f"[연속익절재진입차단] {symbol} | 1h기울기 {slope_1h:.4f} > "
+                f"기준 {config.CONSEC_WIN_REENTRY_SLOPE_MAX:.4f} → 단기 급등 지속, 재진입 보류"
+            )
+            return False
+        logger.info(
+            f"[연속익절재진입허용] {symbol} | 1h기울기 {slope_1h:.4f} <= "
+            f"기준 {config.CONSEC_WIN_REENTRY_SLOPE_MAX:.4f} → 모멘텀 꺾임 확인, 재진입 허용"
+        )
+        return True
 
     # ────────────────────────────────────────────────
     #  BTC 시장 충격 감지
@@ -327,7 +415,7 @@ class StrategyEngine:
         빠른 스캔으로 가장 급락하는 코인 선택 → 전체 자본의 50%로 SHORT 진입.
         DCA 없음, 급락 전용 트레일링, 15분 강제 탈출.
         """
-        blocked = set(self._blocked_symbols.keys())
+        blocked = self._all_blocked
         candidates = self.scanner.scan_crash_shorts(blocked=blocked)
         if not candidates:
             logger.warning("[급락SHORT] 적합한 코인 없음 → 급락모드 종료")
@@ -377,12 +465,16 @@ class StrategyEngine:
         p = self.pt.position
         if p is None:
             return
+        symbol = p.symbol
         trend, crash_short = p.trend, p.crash_short
         if exit_price is None:
             exit_price = self.api.get_price(p.symbol)
         self.pt.close_position(exit_price, reason)
         last_pnl = self.pt.closed_trades[-1]["pnl"] if self.pt.closed_trades else 0.0
         self._track_direction_loss(trend, crash_short, last_pnl)
+        # crash_short는 연속익절 카운터 제외 (급락 모드는 별개)
+        if not crash_short:
+            self._record_win_streak(symbol, last_pnl > 0)
         self._last_exit_time = time.time()
         self.state = BotState.IDLE
 
@@ -443,9 +535,24 @@ class StrategyEngine:
                 self._blocked_symbols = {
                     s: t for s, t in self._blocked_symbols.items() if t > now
                 }
-                blocked = set(self._blocked_symbols.keys())
+                # 쿨다운 해제된 코인 포착 (모멘텀 꺾임 확인 대상)
+                just_released_cw = {
+                    s for s, t in self._consec_win_blocked.items() if t <= now
+                }
+                self._consec_win_blocked = {
+                    s: t for s, t in self._consec_win_blocked.items() if t > now
+                }
+                if just_released_cw:
+                    logger.info(
+                        f"[연속익절쿨다운해제] {just_released_cw} → "
+                        f"1h 기울기 < {config.CONSEC_WIN_REENTRY_SLOPE_MAX:.4f} 확인 후 재진입"
+                    )
+                blocked = self._all_blocked
                 if blocked:
-                    logger.info(f"차단 코인 제외: {blocked}")
+                    cw_info = {s: self._consec_wins.get(s, 0)
+                               for s in self._consec_win_blocked if s in blocked}
+                    logger.info(f"차단 코인 제외: {set(self._blocked_symbols) or ''} "
+                                f"연속익절쿨다운: {cw_info or ''}")
 
                 # 방향 필터: BTC 4h 하락추세 → LONG 차단
                 btc_down = self._is_btc_downtrend_4h()
@@ -462,7 +569,8 @@ class StrategyEngine:
                     (c for c in candidates
                      if c["symbol"] not in blocked
                      and not (c["trend"] == "UP"   and (self._long_blocked or btc_down))
-                     and not (c["trend"] == "DOWN" and self._short_blocked)),
+                     and not (c["trend"] == "DOWN" and self._short_blocked)
+                     and self._check_momentum_cooled(c, just_released_cw)),
                     None
                 )
 
@@ -695,17 +803,36 @@ class StrategyEngine:
                             else SIDEWAYS_DCA_WAIT_PER_STEP.get(p.avg_down_step, 10))
 
                 if step_age_min >= wait_min:
-                    # ── 마지막 단계: 청산 ──────────────────────────
+                    # ── 마지막 단계: 회복/횡보 신호 확인 후 청산 ──────
                     if is_last_stage:
                         symbol = p.symbol
                         stage  = p.avg_down_step
+                        if adverse_candles is None:
+                            adverse_candles = self._count_adverse_candles(p.symbol, p.trend)
+                        # 최대 시간 미도달 시 → 추세 확인
+                        if step_age_min < config.SIDEWAYS_LAST_STAGE_MAX_MIN:
+                            # 역방향캔들 없음: 횡보 or 우상향 → 대기
+                            if adverse_candles == 0:
+                                logger.info(
+                                    f"[마지막결전대기] {symbol} | {stage}단계 {step_age_min:.0f}분 | "
+                                    f"역방향캔들 없음(횡보/회복 중) → 청산 보류 "
+                                    f"(최대 {config.SIDEWAYS_LAST_STAGE_MAX_MIN}분 | "
+                                    f"순손익 ${net_pnl:+.2f})"
+                                )
+                                return
+                            # 역방향캔들 있음: 하락 추세 지속 → 즉시 청산
+                        # 역방향캔들 있거나 최대 시간 초과 → 청산
+                        close_reason = (
+                            "최대시간초과" if step_age_min >= config.SIDEWAYS_LAST_STAGE_MAX_MIN
+                            else f"역방향캔들{adverse_candles}개(하락추세지속)"
+                        )
                         logger.warning(
-                            f"[마지막결전] {symbol} | {stage}단계 "
-                            f"{step_age_min:.0f}분 횡보 → 손절 청산 | 순손익 ${net_pnl:+.2f}"
+                            f"[마지막결전] {symbol} | {stage}단계 {step_age_min:.0f}분 | "
+                            f"사유:{close_reason} → 손절 청산 | 순손익 ${net_pnl:+.2f}"
                         )
                         self._close("마지막결전청산")
                         self._last_scan_time = 0
-                        # 최종단계 손절 코인 48시간 차단 (TAO처럼 반복 손실 방지)
+                        # 최종단계 손절 코인 48시간 차단 (반복 손실 방지)
                         block_until = now + 48 * 3600
                         self._blocked_symbols[symbol] = block_until
                         self._save_engine_state()
@@ -720,12 +847,14 @@ class StrategyEngine:
                     going_to_step4 = (p.avg_down_step == 3)
                     going_to_step5 = (p.avg_down_step == 4)
                     is_final_stages = going_to_step4 or going_to_step5
-                    # 1→2단계는 무조건 진행 (추세 체크 비활성화)
+                    # 1→2단계는 무조건 진행 / 2→3단계: 3개 / 3→4단계: 2개 / 4→5단계: STEP4 기준
                     candle_limit   = (config.ADVERSE_CANDLE_BLOCK_STEP4
                                       if is_final_stages
-                                      else ADVERSE_CANDLE_BLOCK  # =9, 사실상 비활성
+                                      else ADVERSE_CANDLE_BLOCK        # =9, 사실상 비활성
                                       if p.avg_down_step == 1
-                                      else config.SIDEWAYS_DCA_ADVERSE_CANDLES)
+                                      else config.SIDEWAYS_DCA_ADVERSE_CANDLES_S2  # 2→3단계: 3개
+                                      if p.avg_down_step == 2
+                                      else config.SIDEWAYS_DCA_ADVERSE_CANDLES)    # 3→4단계: 2개
                     if adverse_candles >= candle_limit:
                         logger.info(
                             f"[횡보DCA추세차단] {p.symbol} | 역방향 15m 캔들 {adverse_candles}개 연속 "
@@ -777,7 +906,7 @@ class StrategyEngine:
                     (now - self._last_upgrade_scan_time) / 60 >= UPGRADE_SCAN_MIN):
                 self._last_upgrade_scan_time = now
                 try:
-                    blocked = set(self._blocked_symbols.keys())
+                    blocked = self._all_blocked
                     candidates = self.scanner.scan()
                     best = next((c for c in candidates
                                  if c["symbol"] not in blocked
@@ -809,7 +938,7 @@ class StrategyEngine:
                 if age_min >= FLAT_TIMEOUT_MIN and gross_abs < FLAT_THRESHOLD_USD and net_pnl >= 0:
                     # 더 좋은 코인 스캔 (현재 코인 점수보다 높아야 교체 의미 있음)
                     try:
-                        blocked    = set(self._blocked_symbols.keys())
+                        blocked    = self._all_blocked
                         candidates = self.scanner.scan()
                         best = next((c for c in candidates
                                      if c["symbol"] not in blocked
@@ -896,13 +1025,24 @@ class StrategyEngine:
 
         logger.info("=" * 60)
         logger.info(f"  봇 상태      : {self.state.value}")
-        logger.info(f"  ★ 현 자산평가액: ${asset_value:.2f}  "
+        logger.info(f"  현 자산평가액  : ${asset_value:.2f}  "
                     f"({asset_change_pct:+.2f}%  초기 ${self.pt.total_capital:.0f} 대비)")
         logger.info(f"  확정 자본    : ${s['current_capital']:.2f}  "
                     f"(실현 순손익 ${s['total_pnl']:+.2f})")
+        if s.get("withdrawal_count", 0) > 0:
+            logger.info(f"  누적 출금     : ${s['total_withdrawn']:.2f}  "
+                        f"({s['withdrawal_count']}회)")
         logger.info(f"  거래 횟수    : {s['total_trades']}회 "
                     f"({s['win_count']}W / {s['loss_count']}L) "
                     f"승률 {s['win_rate']}%")
+        # 연속 익절 쿨다운 현황
+        now = time.time()
+        cw_active = {s_: round((t_ - now) / 60, 0)
+                     for s_, t_ in self._consec_win_blocked.items() if t_ > now}
+        if cw_active or self._consec_wins:
+            streak_info = {s_: self._consec_wins[s_] for s_ in self._consec_wins}
+            cool_info   = {s_: f"{m:.0f}분후해제" for s_, m in cw_active.items()}
+            logger.info(f"  연속익절     : {streak_info}  쿨다운: {cool_info}")
         if s["position"]:
             pos = s["position"]
             trail_info = (f"  트레일SL     : {pos['trail_sl']:.6f}  "

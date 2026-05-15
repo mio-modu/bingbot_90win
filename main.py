@@ -7,6 +7,18 @@ import logging
 import os
 import time
 import sys
+
+# Windows 터미널 UTF-8 출력 강제
+if sys.platform == "win32":
+    import ctypes
+    try:
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from config import MAIN_LOOP_INTERVAL_SEC, LOG_LEVEL
 from strategy_engine import StrategyEngine
 
@@ -40,7 +52,11 @@ def _show_current_state():
         pnl    = d.get("total_pnl", 0.0)
         total  = wins + losses
         pos    = d.get("position")
+        withdrawn = d.get("total_withdrawn", 0.0)
+        w_count   = d.get("withdrawal_count", 0)
         print(f"  누적 손익  : ${pnl:+.2f}")
+        if w_count > 0:
+            print(f"  총 출금    : ${withdrawn:.2f} ({w_count}회)")
         print(f"  거래 횟수  : {total}회  ({wins}W / {losses}L)")
         if pos:
             print(f"  보유 포지션: {pos['symbol']} ({pos['trend']})  "
