@@ -138,8 +138,13 @@ class StrategyEngine:
         같은 코인을 연속으로 거래할 때만 카운트. 다른 코인이 중간에 끼면 체인 끊김.
         예) A익절→A익절→A익절 = 3연속 / A익절→B익절→A익절 = A는 1연속(체인 끊김)
         """
-        # 직전 거래 코인이 다르면 이 코인의 연속 체인 끊김 → 카운터 초기화
+        # 다른 코인이 청산될 때 기존 모든 코인의 연속 체인 즉시 끊김
         if self._last_closed_symbol and self._last_closed_symbol != symbol:
+            for other in [s for s in list(self._consec_wins) if s != symbol]:
+                prev = self._consec_wins.pop(other)
+                logger.info(
+                    f"[연속익절끊김] {other} | {symbol} 거래 끼어듦 → {prev}연속 체인 끊김"
+                )
             if symbol in self._consec_wins:
                 prev = self._consec_wins.pop(symbol)
                 logger.info(
@@ -259,6 +264,29 @@ class StrategyEngine:
             logger.info(
                 f"[BTC하락감지] {change:.2%} ({config.BTC_DCA4_WINDOW_MIN}분) "
                 f"→ 4단계 DCA 차단"
+            )
+            return True
+        return False
+
+    def _is_btc_bouncing(self) -> bool:
+        """BTC 최근 저점 대비 BTC_BOUNCE_RECOVERY_PCT 이상 반등 → 숏 포지션 위험"""
+        if len(self._btc_price_hist) < 2:
+            return False
+        now = time.time()
+        window = config.BTC_BOUNCE_WINDOW_MIN * 60
+        recent = [(t, p) for t, p in self._btc_price_hist if now - t <= window]
+        if len(recent) < 2:
+            return False
+        prices = [p for _, p in recent]
+        current = prices[-1]
+        low = min(prices)
+        if low >= current:
+            return False
+        recovery = (current - low) / low
+        if recovery >= config.BTC_BOUNCE_RECOVERY_PCT:
+            logger.info(
+                f"[BTC반등감지] 최근{config.BTC_BOUNCE_WINDOW_MIN}분 저점 ${low:.2f} → "
+                f"현재 ${current:.2f} (+{recovery:.2%})"
             )
             return True
         return False
@@ -668,6 +696,18 @@ class StrategyEngine:
                 self._last_scan_time = 0
                 return
 
+            # 2.6. BTC 반등/보합세 → 숏 포지션 조기 손절
+            if (p.trend == "DOWN" and not p.crash_short
+                    and net_pnl < config.BTC_BOUNCE_QUICK_SL
+                    and self._is_btc_bouncing()):
+                logger.warning(
+                    f"[BTC반등조기손절] {p.symbol} | BTC 반등 감지 + 순손익 ${net_pnl:+.2f} "
+                    f"< ${config.BTC_BOUNCE_QUICK_SL:.0f} → 숏 포지션 즉시 청산"
+                )
+                self._close("BTC반등조기손절")
+                self._last_scan_time = 0
+                return
+
             # 2.7. 급락 SHORT: 15분 강제 탈출 + 손절 후 재진입 처리
             if p.crash_short:
                 crash_age_min = (now - p.open_time) / 60
@@ -741,6 +781,8 @@ class StrategyEngine:
                         f"[DCA차단] {p.symbol} | 역방향 15m 캔들 {adverse_candles}개 연속 "
                         f"→ {step_label}가격DCA 보류 (추세전환 가능성)"
                     )
+                elif p.trend == "DOWN" and self._is_btc_bouncing():
+                    logger.info(f"[BTC반등DCA차단] {p.symbol} | BTC 반등/보합 감지 → 숏 가격DCA 전면 차단")
                 elif is_final_stages and self._is_btc_declining():
                     step_label = "4단계" if going_to_step4 else "5단계"
                     logger.info(f"[{step_label}DCA차단] {p.symbol} | BTC 하락 중 → 투입 보류")
@@ -884,6 +926,9 @@ class StrategyEngine:
                             f"→ 추세 진행 중, 횡보DCA 보류"
                         )
                         return
+                    if p.trend == "DOWN" and self._is_btc_bouncing():
+                        logger.info(f"[BTC반등횡보DCA차단] {p.symbol} | BTC 반등/보합 감지 → 숏 횡보DCA 전면 차단")
+                        return
                     if is_final_stages and self._is_btc_declining():
                         step_label = "4단계" if going_to_step4 else "5단계"
                         logger.info(f"[횡보{step_label}DCA차단] {p.symbol} | BTC 하락 중 → 보류")
@@ -901,14 +946,30 @@ class StrategyEngine:
                         )
                         return
                     if p.avg_down_step >= 2:
-                        max_loss_thr = -p.total_invested * config.SIDEWAYS_DCA_MAX_LOSS_RATIO
-                        if net_pnl <= max_loss_thr:
+                        hard_block_thr = -p.total_invested * config.SIDEWAYS_DCA_HARD_BLOCK_RATIO
+                        max_loss_thr   = -p.total_invested * config.SIDEWAYS_DCA_MAX_LOSS_RATIO
+                        if net_pnl <= hard_block_thr:
                             logger.info(
-                                f"[횡보DCA건너뜀] {p.symbol} | 순손익 ${net_pnl:+.2f} ≤ "
-                                f"${max_loss_thr:.0f} (투입금 ${p.total_invested:.0f} × "
-                                f"{config.SIDEWAYS_DCA_MAX_LOSS_RATIO:.1%}) → 손실 중 강제투입 보류"
+                                f"[횡보DCA완전차단] {p.symbol} | 순손익 ${net_pnl:+.2f} ≤ "
+                                f"${hard_block_thr:.0f} (투입금 ${p.total_invested:.0f} × "
+                                f"{config.SIDEWAYS_DCA_HARD_BLOCK_RATIO:.1%}) → 20% 초과 손실, 강제투입 보류"
                             )
                             return
+                        if net_pnl <= max_loss_thr:
+                            # 12.5%~20% 손실 구간: 역방향 15m 캔들 없을 때만 허용
+                            if adverse_candles > 0:
+                                logger.info(
+                                    f"[횡보DCA건너뜀] {p.symbol} | 순손익 ${net_pnl:+.2f} ≤ "
+                                    f"${max_loss_thr:.0f} (투입금 ${p.total_invested:.0f} × "
+                                    f"{config.SIDEWAYS_DCA_MAX_LOSS_RATIO:.1%}) "
+                                    f"+ 역방향 15m 캔들 {adverse_candles}개 → 강제투입 보류"
+                                )
+                                return
+                            logger.info(
+                                f"[횡보DCA손실허용] {p.symbol} | 순손익 ${net_pnl:+.2f} ≤ "
+                                f"${max_loss_thr:.0f} 이지만 역방향 15m 캔들 없음 "
+                                f"(횡보/상향 가능성) → DCA 허용"
+                            )
                     next_amt = p.next_avg_down_amount()
                     logger.info(
                         f"[횡보DCA] {p.symbol} | {p.avg_down_step}단계 "

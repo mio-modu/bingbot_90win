@@ -135,6 +135,11 @@ DCA_STEP5_DAILY_MAX        = 4      # 5단계 DCA 하루 최대 횟수 (마지�
 BTC_DCA4_DROP_PCT          = -0.01  # BTC 최근 15분 -1% 이상 하락 시 4·5단계 차단
 BTC_DCA4_WINDOW_MIN        = 15     # BTC 하락 감지 윈도우 (분)
 
+# BTC 반등/보합세 감지 → 숏 포지션 DCA 차단 + 조기 손절
+BTC_BOUNCE_RECOVERY_PCT   = 0.008  # 최근 30분 저점 대비 +0.8% 반등 = 반등세 감지
+BTC_BOUNCE_WINDOW_MIN     = 30     # 저점 탐색 윈도우 (분)
+BTC_BOUNCE_QUICK_SL       = -30.0  # 반등 감지 시 숏 조기 손절 기준 ($)
+
 # 하드캡 이후 손절
 HARD_CAP_STOP_COIN_PCT  = -0.02  # 코인 추가 -2% → 전량 손절 (강화)
 
@@ -229,10 +234,10 @@ SIDEWAYS_BLOCK_MIN     = 120   # 횡보 DCA 청산 후 코인 차단 시간 (분
 # → 2.5% 설정 시 $240 기준 순수익 +$2.16 확보
 SIDEWAYS_DCA_TP_PCT    = 0.025  # 횡보 DCA 익절 최소 pnl% (2.5%)
 SIDEWAYS_DCA_MIN_NET   = 2.0    # 횡보 DCA 익절 최소 순수익 ($2, 손익분기 이상 보장)
-SIDEWAYS_DCA_MAX_LOSS_RATIO = 0.125  # 현재 투입금의 12.5% 이상 손실이면 횡보DCA 차단
-                                     # 시드 비례 자동조정: $60→-$30, $135→-$67, $165→-$82
+SIDEWAYS_DCA_MAX_LOSS_RATIO  = 0.125  # 현재 투입금의 12.5% 이상 손실 → 역방향캔들 없을 때만 허용
+SIDEWAYS_DCA_HARD_BLOCK_RATIO = 0.20  # 현재 투입금의 20% 이상 손실 → 완전 차단 (역방향캔들 무관)
 SIDEWAYS_DCA_ADVERSE_CANDLES    = 2  # 횡보DCA 전용: 3→4단계 역방향 15m 캔들 N개 이상 → 차단
-SIDEWAYS_DCA_ADVERSE_CANDLES_S2 = 3  # 횡보DCA 전용: 2→3단계 역방향 15m 캔들 N개 이상 → 차단 (여유있게)
+SIDEWAYS_DCA_ADVERSE_CANDLES_S2 = 2  # 횡보DCA 전용: 2→3단계 역방향 15m 캔들 N개 이상 → 차단
 SIDEWAYS_DCA_STAGE_TIMEOUT_MIN = { # 단계별 최대 유지 시간: 초과 + 손실이면 강제 청산
     1: 60,   # 1단계 진입 후 60분 손실 중 → 청산
     2: 45,   # 2단계 진입 후 45분 손실 중 → 청산
