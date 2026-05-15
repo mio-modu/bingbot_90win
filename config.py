@@ -216,7 +216,8 @@ SIDEWAYS_DCA_WAIT_PER_STEP = {
     4:  8,   # 4단계 → 5단계:  8분 대기 (구: 10분) + 안전장치 유지
 }
 SIDEWAYS_LAST_STAGE_TIMEOUT_MIN = 15  # 마지막 단계(5단계) N분 경과 → 회복 신호 체크 시작
-SIDEWAYS_LAST_STAGE_MAX_MIN     = 60  # 5단계 절대 최대 보유 시간 (회복 신호 있어도 이 시간 초과 시 강제 청산)
+SIDEWAYS_LAST_STAGE_MAX_MIN     = 60  # 5단계 절대 최대 보유 시간 (역방향캔들 없으면 최대 60분 대기)
+SIDEWAYS_STAGE4_MAX_MIN         = 45  # 4단계 결전 최대 보유 시간 (역방향캔들 없으면 최대 45분 대기)
 # 5단계 흐름: 15분 경과 → 역방향캔들 확인
 #   역방향캔들 없음 OR 횡보/우상향 중 → 계속 대기 (최대 60분)
 #   역방향캔들 있음(추세 지속 하락) → 즉시 청산

@@ -784,10 +784,33 @@ class StrategyEngine:
                     if step_age_min >= timeout_min:
                         symbol = p.symbol
                         stage  = p.avg_down_step
-                        logger.warning(
-                            f"[단계타임아웃] {symbol} | {stage}단계 "
-                            f"{step_age_min:.0f}분 손실 중(${net_pnl:+.2f}) → 청산"
-                        )
+                        # ── 4단계: 5단계와 동일한 결전 로직 (역방향캔들 없으면 회복 대기) ──
+                        if stage == 4:
+                            if adverse_candles is None:
+                                adverse_candles = self._count_adverse_candles(p.symbol, p.trend)
+                            if (adverse_candles == 0 and
+                                    step_age_min < config.SIDEWAYS_STAGE4_MAX_MIN):
+                                logger.info(
+                                    f"[4단계결전대기] {symbol} | {step_age_min:.0f}분 | "
+                                    f"역방향캔들 없음(횡보/회복 중) → 청산 보류 "
+                                    f"(최대 {config.SIDEWAYS_STAGE4_MAX_MIN}분 | "
+                                    f"순손익 ${net_pnl:+.2f})"
+                                )
+                                return
+                            close_reason_4 = (
+                                "최대시간초과"
+                                if step_age_min >= config.SIDEWAYS_STAGE4_MAX_MIN
+                                else f"역방향캔들{adverse_candles}개(하락추세지속)"
+                            )
+                            logger.warning(
+                                f"[4단계결전] {symbol} | {step_age_min:.0f}분 | "
+                                f"사유:{close_reason_4} → 손절 청산 | 순손익 ${net_pnl:+.2f}"
+                            )
+                        else:
+                            logger.warning(
+                                f"[단계타임아웃] {symbol} | {stage}단계 "
+                                f"{step_age_min:.0f}분 손실 중(${net_pnl:+.2f}) → 청산"
+                            )
                         self._close("단계타임아웃청산")
                         self._last_scan_time = 0
                         # 2단계 이상 타임아웃 손절 → 24시간 차단 (반복 손실 방지)
