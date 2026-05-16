@@ -82,6 +82,9 @@ class StrategyEngine:
         self._long_blocked: bool        = False
         self._short_blocked: bool       = False
         self._trading_pause_until: float = 0.0
+        # 방향 손절 신호: 단기 방향 차단 (큰 손절 N회 누적 시)
+        self._dir_loss_block: dict  = {"UP": 0.0, "DOWN": 0.0}  # 방향별 차단 해제 시각
+        self._dir_loss_events: list = []  # [(timestamp, direction), ...] 최근 큰 손절 이력
         self._load_engine_state()
 
     # ────────────────────────────────────────────────
@@ -392,6 +395,25 @@ class StrategyEngine:
         if self._long_blocked and self._short_blocked:
             self._activate_trading_pause()
 
+    def _record_dir_loss_signal(self, direction: str, pnl: float, crash_short: bool):
+        """큰 손절 발생 시 방향 차단 신호 기록. crash_short는 제외."""
+        if crash_short or pnl > config.DIR_LOSS_BIG_THRESHOLD:
+            return
+        now = time.time()
+        cutoff = now - config.DIR_LOSS_WINDOW_H * 3600
+        self._dir_loss_events = [(t, d) for t, d in self._dir_loss_events if t >= cutoff]
+        self._dir_loss_events.append((now, direction))
+        count    = sum(1 for _, d in self._dir_loss_events if d == direction)
+        cooldown = (config.DIR_LOSS_2_COOLDOWN_MIN if count >= 2
+                    else config.DIR_LOSS_1_COOLDOWN_MIN)
+        self._dir_loss_block[direction] = now + cooldown * 60
+        dir_label = "SHORT" if direction == "DOWN" else "LONG"
+        opp_label = "LONG"  if direction == "DOWN" else "SHORT"
+        logger.warning(
+            f"[방향손절신호] {dir_label} {count}번째 큰 손절 (순${pnl:+.0f}) → "
+            f"{dir_label} {cooldown}분 차단 / {opp_label} 방향 선호"
+        )
+
     def _activate_trading_pause(self):
         """LONG·SHORT 양방향 차단 → 전면 매매 금지 + 카운터 초기화."""
         now = time.time()
@@ -500,6 +522,7 @@ class StrategyEngine:
         self.pt.close_position(exit_price, reason)
         last_pnl = self.pt.closed_trades[-1]["pnl"] if self.pt.closed_trades else 0.0
         self._track_direction_loss(trend, crash_short, last_pnl)
+        self._record_dir_loss_signal(trend, last_pnl, crash_short)
         # crash_short는 연속익절 카운터 제외 (급락 모드는 별개)
         if not crash_short:
             self._record_win_streak(symbol, last_pnl > 0)
@@ -591,13 +614,23 @@ class StrategyEngine:
                 if self._short_blocked:
                     logger.info("[SHORT차단] 일별 SHORT 손실 한도 초과 → SHORT 진입 불가")
 
+                # 방향 손절 신호 차단 체크 (큰 손절 1~2회 누적 시 단기 방향 차단)
+                dir_block_down = now < self._dir_loss_block.get("DOWN", 0)
+                dir_block_up   = now < self._dir_loss_block.get("UP",   0)
+                if dir_block_down:
+                    rem = (self._dir_loss_block["DOWN"] - now) / 60
+                    logger.info(f"[방향손절차단] SHORT 큰 손절 누적 → SHORT 진입 차단 ({rem:.0f}분 남음) / LONG 선호")
+                if dir_block_up:
+                    rem = (self._dir_loss_block["UP"] - now) / 60
+                    logger.info(f"[방향손절차단] LONG 큰 손절 누적 → LONG 진입 차단 ({rem:.0f}분 남음) / SHORT 선호")
+
                 # 차단 코인 + 방향 필터 적용 후 선택
                 candidates = self.scanner.scan()
                 coin = next(
                     (c for c in candidates
                      if c["symbol"] not in blocked
-                     and not (c["trend"] == "UP"   and (self._long_blocked or btc_down))
-                     and not (c["trend"] == "DOWN" and self._short_blocked)
+                     and not (c["trend"] == "UP"   and (self._long_blocked or btc_down or dir_block_up))
+                     and not (c["trend"] == "DOWN" and (self._short_blocked or dir_block_down))
                      and self._check_momentum_cooled(c, just_released_cw)),
                     None
                 )
