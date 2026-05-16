@@ -2,9 +2,11 @@
 BingX Trading Bot - 메인 실행
 """
 
+import argparse
 import json
 import logging
 import os
+import signal
 import time
 import sys
 
@@ -113,9 +115,22 @@ def _startup_menu():
             print("  1, 2, 3 중 하나를 입력하세요.")
 
 
+def _force_exit(sig, frame):
+    os._exit(0)
+
+
 def main():
-    if not _startup_menu():
-        sys.exit(0)
+    signal.signal(signal.SIGINT, _force_exit)
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--no-menu", action="store_true")
+    pargs, _ = parser.parse_known_args()
+
+    if pargs.no_menu:
+        logger.info("자동 재시작 모드 - 기존 상태 이어서 시작")
+        _show_current_state()
+    elif not _startup_menu():
+        os._exit(0)
 
     logger.info("=" * 60)
     logger.info("  BingX Trading Bot 시작")
@@ -146,8 +161,7 @@ def main():
                 time.sleep(0.5)
 
     except KeyboardInterrupt:
-        logger.info("봇 종료 (Ctrl+C)")
-        engine.print_status()
+        os._exit(0)
     except Exception as e:
         logger.critical(f"치명적 오류: {e}", exc_info=True)
         sys.exit(1)

@@ -330,7 +330,7 @@ class StrategyEngine:
     def _is_btc_downtrend_4h(self) -> bool:
         """BTC 4시간 MA 기울기 < BTC_4H_SLOPE_THRESHOLD → True (30분 캐시)."""
         now = time.time()
-        if now - self._last_btc_4h_check < 1800:
+        if now - self._last_btc_4h_check < 600:
             return self._btc_4h_downtrend
         self._last_btc_4h_check = now
         try:
@@ -837,6 +837,29 @@ class StrategyEngine:
                     self.pt.execute_avg_down(price)
                     return
 
+            # 4.5. 2단계+ 강한 역방향 추세 조기 손절 (마지막결전 전 선제 탈출)
+            #      역방향 캔들 N개 연속 + 손실 기준 이상 → 추가 투입 없이 즉시 탈출
+            if (not p.crash_short and
+                    p.avg_down_step >= config.EARLY_ADVERSE_EXIT_MIN_STEP and
+                    p.avg_down_step < config.MAX_DCA_STAGES and
+                    net_pnl < config.EARLY_ADVERSE_EXIT_LOSS_USD):
+                if adverse_candles is None:
+                    adverse_candles = self._count_adverse_candles(p.symbol, p.trend)
+                if adverse_candles >= config.EARLY_ADVERSE_EXIT_CANDLES:
+                    logger.warning(
+                        f"[추세조기손절] {p.symbol} | {p.avg_down_step}단계 | "
+                        f"역방향 {adverse_candles}개 연속 + 순손익 ${net_pnl:+.2f} → 조기 탈출"
+                    )
+                    self._close("추세조기손절")
+                    self._last_scan_time = 0
+                    block_until = now + 24 * 3600
+                    self._blocked_symbols[p.symbol] = block_until
+                    self._save_engine_state()
+                    logger.warning(
+                        f"[손절코인차단] {p.symbol} | 추세조기손절 → 24시간 차단"
+                    )
+                    return
+
             # 5. 횡보 DCA (단계별 대기시간) + 마지막 단계 횡보 청산
             #    1 ~ MAX_DCA_STAGES-1 단계: N분 경과 → 다음 단계 DCA
             #    MAX_DCA_STAGES 단계(마지막): N분 경과 → 청산 (마지막 결전)
@@ -1082,15 +1105,23 @@ class StrategyEngine:
                         logger.debug(f"횡보교체 스캔 실패: {e}")
                     return
 
-            # 8. 최대 보유 시간 초과 → 수익 구간이면 교체
+            # 8. 최대 보유 시간 초과 → 수익 구간이면 교체 (2단계 이상 DCA 포지션 제외)
+            #    고단계 포지션은 레버리지 노출이 커 가격 변동에 수수료가 이익 초과 위험 →
+            #    트레일SL·마지막결전으로 자연 처리
             coin_age_min = (now - self._current_coin_enter_time) / 60
-            if coin_age_min >= MAX_COIN_DURATION_MIN and net_pnl >= 0:
-                logger.info(
-                    f"[시간교체] {p.symbol} {coin_age_min:.0f}분 보유 → "
-                    f"순손익 ${net_pnl:+.2f} → 재스캔"
-                )
-                self._close("시간교체")
-                return
+            if coin_age_min >= MAX_COIN_DURATION_MIN:
+                if p.avg_down_step > config.TIME_ROTATE_MAX_DCA_STEP:
+                    logger.debug(
+                        f"[시간교체차단] {p.symbol} | {p.avg_down_step}단계 DCA 포지션 → "
+                        f"트레일SL·마지막결전 대기 (시간교체 차단)"
+                    )
+                elif net_pnl >= 0:
+                    logger.info(
+                        f"[시간교체] {p.symbol} {coin_age_min:.0f}분 보유 → "
+                        f"순손익 ${net_pnl:+.2f} → 재스캔"
+                    )
+                    self._close("시간교체")
+                    return
 
             # 9. 트렌드 반전 체크 (5분 1회 쓰로틀)
             #    ① 수익 구간: 반전 + 거래량 고갈 → 코인 교체
