@@ -140,7 +140,10 @@ def main():
                 engine.print_status()
                 last_status_time = now
 
-            time.sleep(MAIN_LOOP_INTERVAL_SEC)
+            # 0.5초씩 나눠 자서 Ctrl+C 즉시 반응
+            end = time.time() + MAIN_LOOP_INTERVAL_SEC
+            while time.time() < end:
+                time.sleep(0.5)
 
     except KeyboardInterrupt:
         logger.info("봇 종료 (Ctrl+C)")
