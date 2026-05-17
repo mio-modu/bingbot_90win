@@ -105,6 +105,7 @@ MAX_TOTAL_POSITION     = 960.0   # 하드캡 기본값 (실제: 진입 시 시�
 DYNAMIC_SEED_BASE_CAPITAL = 1000.0   # 기준 자본
 DYNAMIC_SEED_STEP_CAPITAL =   80.0   # 자본 증가 단위 ($80마다)
 DYNAMIC_SEED_STEP_USD     =    5.0   # 시드 증가 단위 (+$5)
+DYNAMIC_SEED_MAX_USD      =  270.0   # 시드 상한 — 자본이 아무리 커도 시드는 $270 초과 불가
 
 # ────────────────────────────────────────────────
 #  자동 출금 시뮬레이션

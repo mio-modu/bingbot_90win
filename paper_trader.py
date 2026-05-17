@@ -465,7 +465,8 @@ class PaperTrader:
         capital    = self.total_capital + self.total_pnl
         increments = max(0, int((capital - config.DYNAMIC_SEED_BASE_CAPITAL)
                                 / config.DYNAMIC_SEED_STEP_CAPITAL))
-        return config.INITIAL_POSITION_USD + increments * config.DYNAMIC_SEED_STEP_USD
+        return min(config.INITIAL_POSITION_USD + increments * config.DYNAMIC_SEED_STEP_USD,
+                   config.DYNAMIC_SEED_MAX_USD)
 
     def _get_max_loss_usd(self) -> float:
         """동적 손절 한도: -min(시드 × SEED_MULT, CEILING)
