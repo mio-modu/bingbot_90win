@@ -257,9 +257,9 @@ SIDEWAYS_DCA_STAGE_TIMEOUT_MIN = { # 단계별 최대 유지 시간: 초과 + �
 # ────────────────────────────────────────────────
 # 2단계 이상에서 역방향 15m 캔들이 N개 연속이고 손실이 기준 이상이면
 # 마지막결전/타임아웃을 기다리지 않고 즉시 탈출 (추가 손실 방지)
-EARLY_ADVERSE_EXIT_MIN_STEP = 2      # 이 단계 이상 적용 (마지막단계 제외)
+EARLY_ADVERSE_EXIT_MIN_STEP = 3      # 이 단계 이상 적용 (2단계는 45분 타임아웃으로 충분)
 EARLY_ADVERSE_EXIT_CANDLES  = 4      # 역방향 15m 캔들 N개 연속 시 조기 탈출
-EARLY_ADVERSE_EXIT_LOSS_USD = -60.0  # 이 이상 순손실 중일 때만 발동 (USD)
+EARLY_ADVERSE_EXIT_LOSS_USD = -80.0  # 이 이상 순손실 중일 때만 발동 (USD, 3단계 기준 위험구간)
 
 # ────────────────────────────────────────────────
 #  시간교체 DCA 단계 제한 (고비용 포지션 보호)
