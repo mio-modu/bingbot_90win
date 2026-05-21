@@ -461,12 +461,17 @@ class PaperTrader:
     # ── 진입 ─────────────────────────────────────────────────
 
     def _get_initial_position_usd(self) -> float:
-        """자본 증가에 따른 동적 시드 계산"""
+        """자본 증가에 따른 동적 시드 계산
+        상한 1: DYNAMIC_SEED_MAX_USD ($270 절대 상한)
+        상한 2: capital × DYNAMIC_SEED_CAPITAL_RATIO (4단계 투입금 = 시드×16이 자본 96% 이하)
+        """
         capital    = self.total_capital + self.total_pnl
         increments = max(0, int((capital - config.DYNAMIC_SEED_BASE_CAPITAL)
                                 / config.DYNAMIC_SEED_STEP_CAPITAL))
-        return min(config.INITIAL_POSITION_USD + increments * config.DYNAMIC_SEED_STEP_USD,
-                   config.DYNAMIC_SEED_MAX_USD)
+        base_seed = min(config.INITIAL_POSITION_USD + increments * config.DYNAMIC_SEED_STEP_USD,
+                        config.DYNAMIC_SEED_MAX_USD)
+        capital_ratio_cap = capital * config.DYNAMIC_SEED_CAPITAL_RATIO
+        return min(base_seed, capital_ratio_cap)
 
     def _get_max_loss_usd(self) -> float:
         """동적 손절 한도: -min(시드 × SEED_MULT, CEILING)
