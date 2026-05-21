@@ -21,7 +21,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from config import MAIN_LOOP_INTERVAL_SEC, LOG_LEVEL
+from config import MAIN_LOOP_INTERVAL_SEC, LOG_LEVEL, TOTAL_CAPITAL
 from strategy_engine import StrategyEngine
 
 STATE_FILE       = os.path.join(os.path.dirname(__file__), "state.json")
@@ -71,13 +71,18 @@ def _show_current_state():
 
 def _reset_state():
     """거래 기록 초기화 (state + engine_state)"""
-    empty_state = {"total_pnl": 0.0, "win_count": 0, "loss_count": 0,
-                   "closed_trades": [], "position": None}
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(empty_state, f, ensure_ascii=False, indent=2)
+    empty_state = {
+        "total_pnl": 0.0, "win_count": 0, "loss_count": 0,
+        "closed_trades": [], "position": None,
+        "total_withdrawn": 0.0, "withdrawal_count": 0, "withdrawal_history": []
+    }
+    for path in [STATE_FILE, STATE_FILE + ".bak"]:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(empty_state, f, ensure_ascii=False, indent=2)
     with open(ENGINE_STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"blocked_symbols": {}}, f, ensure_ascii=False, indent=2)
-    print("  ✔ 초기화 완료 — $1000 에서 새로 시작합니다.")
+        json.dump({"blocked_symbols": {}, "consec_wins": {}, "consec_win_blocked": {}},
+                  f, ensure_ascii=False, indent=2)
+    print(f"  ✔ 초기화 완료 — ${TOTAL_CAPITAL:,.0f} 에서 새로 시작합니다.")
 
 
 def _startup_menu():
@@ -92,7 +97,7 @@ def _startup_menu():
     print()
     print("  시작 방법을 선택하세요:")
     print("    1) 이어서 시작  (기존 기록 유지)")
-    print("    2) 초기화 후 시작  ($1000 리셋)")
+    print(f"    2) 초기화 후 시작  (${TOTAL_CAPITAL:,.0f} 리셋)")
     print("    3) 종료")
     print()
 
