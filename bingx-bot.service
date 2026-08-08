@@ -1,0 +1,19 @@
+[Unit]
+Description=BingX Trading Bot (불사조 감시자)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/bingx-bot
+ExecStart=/opt/bingx-bot/venv/bin/python -u watchdog.py --auto
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/bingx-bot/service.log
+StandardError=append:/opt/bingx-bot/service.log
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
