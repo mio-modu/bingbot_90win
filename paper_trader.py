@@ -97,6 +97,10 @@ class Position:
     # DCA 단계 이력: [{step, at_s, price, add_usd, total_invested, kind}]
     step_history:    list   = field(default_factory=list)
 
+    # 거래소 강제 손절 주문 (봇이 죽어도 거래소가 집행하는 백스톱)
+    stop_order_id:   str    = ""
+    stop_price:      float  = 0.0
+
     @property
     def max_position(self) -> float:
         """하드캡: 진입 시 시드 × 20, 단 실제 보유 자본을 초과하지 않음"""
@@ -381,6 +385,108 @@ class PaperTrader:
         rounded = round(qty, precision)
         return int(rounded) if precision == 0 else rounded
 
+    # ── 거래소 강제 손절 백스톱 ─────────────────────────────────
+    #
+    # 봇의 자체 손절은 프로세스가 살아 있고 API가 응답할 때만 작동한다.
+    # 봇이 죽거나 회선이 끊기면 포지션은 무방비다 — 4단계에서 코인 -12%면
+    # 계좌가 청산된다. 그래서 거래소 서버 쪽에 STOP_MARKET 을 걸어둔다.
+    # 정상 상황에선 봇 손절이 먼저 발동하므로 이 주문은 체결되지 않는다.
+
+    def _stop_loss_usd(self) -> float:
+        """백스톱이 발동할 손실 금액 (양수 USD)"""
+        bot_cap  = abs(self._get_max_loss_usd()) * config.EXCHANGE_STOP_MULT
+        capital  = self.total_capital + self.total_pnl
+        hard_cap = capital * config.EXCHANGE_STOP_MAX_CAPITAL_RATIO
+        return max(1.0, min(bot_cap, hard_cap))
+
+    def _stop_distance(self, p: Position) -> float:
+        """평단 대비 STOP 까지의 코인 변동률 (양수)
+
+        두 기준 중 **가까운 쪽**을 쓴다:
+          ① 금액 기준 — gross_pnl = 투입 × coin_pct × LEVERAGE = -L
+                        → coin_pct = L / (투입 × LEVERAGE)
+          ② 변동률 상한 — 저단계에서는 ①이 -75% 같은 도달 불가 지점이 되므로,
+                        "코인이 이만큼 움직이면 무조건 나간다"는 절대선을 둔다.
+        """
+        notional = p.total_invested * config.LEVERAGE
+        if notional <= 0:
+            return 0.0
+        by_usd = self._stop_loss_usd() / notional
+        return min(by_usd, config.EXCHANGE_STOP_MAX_COIN_PCT, 0.95)
+
+    def _calc_stop_price(self, p: Position) -> float:
+        """STOP 주문을 걸 코인 가격"""
+        x = self._stop_distance(p)
+        if x <= 0:
+            return 0.0
+        return p.avg_price * (1 - x) if p.trend == "UP" else p.avg_price * (1 + x)
+
+    def _cancel_exchange_stop(self, symbol: str, order_id: str):
+        """기존 STOP 주문 취소 (실패해도 무시 — 이미 체결·소멸했을 수 있음)"""
+        if not order_id:
+            return
+        try:
+            self.live_api.cancel_order(symbol, order_id)
+        except Exception as e:
+            logger.debug(f"[백스톱] 기존 주문 취소 실패(무시): {e}")
+
+    def sync_exchange_stop(self):
+        """진입·DCA 직후 호출. 평단이 바뀌었으므로 STOP 주문을 다시 건다.
+
+        실패해도 매매는 계속된다 — 백스톱이 없을 뿐 봇 자체 손절은 살아 있다.
+        다만 보호막이 없는 상태이므로 WARNING 으로 남긴다.
+        """
+        if not config.EXCHANGE_STOP_ENABLED:
+            return
+        if not self.live_api or not config.LIVE_TRADING:
+            return
+        p = self.position
+        if not p:
+            return
+
+        new_price = self._calc_stop_price(p)
+        if new_price <= 0:
+            return
+
+        try:
+            precision = self.live_api.get_price_precision(p.symbol)
+            new_price = round(new_price, precision)
+            pos_side  = "LONG" if p.trend == "UP" else "SHORT"
+            qty       = self._round_qty(p.symbol, p.total_qty)
+
+            self._cancel_exchange_stop(p.symbol, p.stop_order_id)
+            p.stop_order_id, p.stop_price = "", 0.0
+
+            result = self.live_api.place_stop_market(p.symbol, pos_side, new_price, qty)
+            if str(result.get("code", "?")) != "0":
+                logger.warning(
+                    f"[백스톱 실패] {p.symbol} code={result.get('code')} "
+                    f"msg={result.get('msg','')} — 거래소 손절 없이 진행 "
+                    f"(봇 자체 손절은 정상 작동)"
+                )
+                return
+
+            order = result.get("data", {}).get("order", {})
+            p.stop_order_id = str(order.get("orderId", ""))
+            p.stop_price    = new_price
+            implied_loss = p.gross_pnl(new_price)
+            logger.info(
+                f"[백스톱] {p.symbol} STOP_MARKET @ {new_price:.8f} "
+                f"(코인 {self._stop_distance(p)*100:.1f}% → 손실 ${implied_loss:+.0f}) | "
+                f"{p.avg_down_step}단계 투입 ${p.total_invested:.0f} | id={p.stop_order_id}"
+            )
+        except Exception as e:
+            logger.warning(f"[백스톱 실패] {p.symbol}: {e} — 거래소 손절 없이 진행")
+
+    def clear_exchange_stop(self, symbol: str, order_id: str = None):
+        """청산 후 남은 STOP 주문 정리 (고아 주문이 다음 포지션을 오폭하지 않도록)"""
+        if not self.live_api or not config.LIVE_TRADING:
+            return
+        try:
+            self.live_api.cancel_all_open_orders(symbol)
+        except Exception as e:
+            logger.debug(f"[백스톱] 정리 실패(무시) {symbol}: {e}")
+
     def _live_entry(self, symbol: str, trend: str, qty: float) -> bool:
         """실거래 진입 주문 (헤지모드 LONG/SHORT). 성공 True / 실패 False"""
         if not self.live_api or not config.LIVE_TRADING:
@@ -509,6 +615,8 @@ class PaperTrader:
                 "mfe_at_s":     p.mfe_at_s,
                 "mae_at_s":     p.mae_at_s,
                 "step_history": p.step_history,
+                "stop_order_id": p.stop_order_id,
+                "stop_price":    p.stop_price,
             }
         data = {
             "total_pnl":          self.total_pnl,
@@ -578,6 +686,8 @@ class PaperTrader:
                         mfe_at_s     = float(pd.get("mfe_at_s", 0.0)),
                         mae_at_s     = float(pd.get("mae_at_s", 0.0)),
                         step_history = list(pd.get("step_history", [])),
+                        stop_order_id = str(pd.get("stop_order_id", "")),
+                        stop_price    = float(pd.get("stop_price", 0.0)),
                     )
                     # initial_invest 마이그레이션
                     # (구버전 state.json에 필드 없을 때 → 현재 config 시드로 설정)
@@ -606,6 +716,9 @@ class PaperTrader:
                             p.peak_price   = p.avg_price
                             logger.info(f"[state] 트레일 리셋 (재시작 시 유효하지 않은 trail_sl)")
                     self.position = p
+                    # 봇이 죽어 있던 동안 STOP 주문이 취소·체결됐을 수 있다.
+                    # 재시작 시 무조건 다시 걸어 백스톱 공백을 없앤다.
+                    self.sync_exchange_stop()
                 total = self.win_count + self.loss_count
                 logger.info(
                     f"[state] 복원 완료 | 누적손익 ${self.total_pnl:+.2f} | "
@@ -690,6 +803,7 @@ class PaperTrader:
             f"체결가: {fill_price:.6f} | 투입: ${invest:.0f} | "
             f"수수료: ${fee:.3f} | 슬리피지: ${slip_usd:.3f}"
         )
+        self.sync_exchange_stop()   # 진입 즉시 거래소 백스톱 배치
         self.save_state()
         return self.position
 
@@ -703,6 +817,10 @@ class PaperTrader:
         # 실거래: 청산 주문 (실패 시 paper state 유지 — 수동 청산 후 봇 재시작 필요)
         if not self._live_close(p.symbol, p.trend):
             return {}  # 청산 실패 → paper state 그대로 유지 (새 포지션 진입 차단)
+
+        # 청산 성공 → 거래소에 남은 STOP 주문 정리.
+        # 고아 STOP 이 남으면 같은 코인에 재진입했을 때 엉뚱한 가격에 오폭한다.
+        self.clear_exchange_stop(p.symbol, p.stop_order_id)
 
         fill_price = _apply_slip(raw_price, p.trend, entry=False)
         pnl        = p.realized_pnl(fill_price)
@@ -971,6 +1089,7 @@ class PaperTrader:
                 logger.error(f"[DCA건너뜀] {p.symbol} 실거래 주문 실패")
                 return
         p.apply_avg_down(price, add_usd)
+        self.sync_exchange_stop()   # 평단·수량 변경 → STOP 재배치
         self.save_state()
 
     def execute_sideways_avg_down(self, price: float):
@@ -994,6 +1113,7 @@ class PaperTrader:
                 return
         p.apply_avg_down(price, add_usd, kind="sideways")
         p.sideways_dca = True   # TP 조건을 단순 +1%로 전환
+        self.sync_exchange_stop()   # 평단·수량 변경 → STOP 재배치
         self.save_state()
 
     def execute_pyramid(self, price: float):
@@ -1009,6 +1129,7 @@ class PaperTrader:
                        else config.PYRAMID_RATIO_S1)
         add_usd     = config.INITIAL_POSITION_USD * ratio * scale
         p.apply_pyramid(price, add_usd)
+        self.sync_exchange_stop()   # 수량 변경 → STOP 재배치
         self.save_state()
 
     # ── 급락 감지 ────────────────────────────────────────────

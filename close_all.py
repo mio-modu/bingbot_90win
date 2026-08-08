@@ -69,6 +69,13 @@ def close_all_positions(api: BingXAPI):
         else:
             print(f"  !! {symbol} {pos_side} 청산 실패 — 거래소에서 수동 확인 필요")
             all_ok = False
+
+        # 백스톱 STOP 주문이 남아 있으면 다음 진입 때 오폭한다 — 함께 정리
+        try:
+            api.cancel_all_open_orders(symbol)
+            print(f"  {symbol} 미체결 주문 정리 완료")
+        except Exception as e:
+            print(f"  {symbol} 미체결 주문 정리 실패(수동 확인 권장): {e}")
     return all_ok
 
 

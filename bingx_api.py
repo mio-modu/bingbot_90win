@@ -69,6 +69,14 @@ class BingXAPI:
         resp.raise_for_status()
         return resp.json()
 
+    def _delete(self, path: str, params: dict = None) -> dict:
+        params = params or {}
+        signed = self._sign(params)
+        url = f"{self.base_url}{path}?{signed}"
+        resp = self.session.delete(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
     # ────────────────────────────────────────────────
     #  잔고
     # ────────────────────────────────────────────────
@@ -197,6 +205,66 @@ class BingXAPI:
         except Exception:
             pass
         return result
+
+    # ────────────────────────────────────────────────
+    #  거래소 강제 손절 (STOP_MARKET)
+    # ────────────────────────────────────────────────
+    # 봇이 죽거나 인터넷이 끊겨도 거래소가 직접 손절을 집행하도록
+    # 진입 즉시 서버 측에 STOP_MARKET 주문을 걸어둔다.
+    # 봇의 자체 손절(-$250 등)이 정상 작동하면 이 주문은 발동하지 않는다.
+
+    def place_stop_market(self, symbol: str, position_side: str,
+                          stop_price: float, quantity: float) -> dict:
+        """포지션 방향 반대편에 STOP_MARKET 청산 주문을 건다 (헤지모드)"""
+        side = "SELL" if position_side == "LONG" else "BUY"
+        return self._post("/openApi/swap/v2/trade/order", {
+            "symbol":       symbol,
+            "side":         side,
+            "positionSide": position_side,
+            "type":         "STOP_MARKET",
+            "stopPrice":    stop_price,
+            "quantity":     quantity,
+        })
+
+    def get_open_orders(self, symbol: str = None) -> list:
+        """미체결 주문 목록"""
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        data = self._get("/openApi/swap/v2/trade/openOrders", params)
+        orders = data.get("data", {})
+        if isinstance(orders, dict):
+            orders = orders.get("orders", [])
+        return orders or []
+
+    def cancel_order(self, symbol: str, order_id) -> dict:
+        """주문 1건 취소"""
+        return self._delete("/openApi/swap/v2/trade/order", {
+            "symbol":  symbol,
+            "orderId": order_id,
+        })
+
+    def cancel_all_open_orders(self, symbol: str) -> dict:
+        """해당 심볼의 미체결 주문 전부 취소 (청산 후 고아 STOP 주문 정리)"""
+        return self._delete("/openApi/swap/v2/trade/allOpenOrders", {
+            "symbol": symbol,
+        })
+
+    def get_price_precision(self, symbol: str) -> int:
+        """심볼의 가격 소수점 자릿수 (STOP 가격 반올림용)"""
+        try:
+            for c in self.get_contracts():
+                if c.get("symbol") == symbol:
+                    # BingX 는 pricePrecision 또는 tickSize 중 하나를 준다
+                    if c.get("pricePrecision") is not None:
+                        return int(c["pricePrecision"])
+                    tick = float(c.get("tickSize", 0) or 0)
+                    if tick > 0:
+                        import math as _m
+                        return max(0, int(round(-_m.log10(tick))))
+        except Exception as e:
+            logger.warning(f"[price_precision] {symbol} 조회 실패: {e}")
+        return 6
 
     # ────────────────────────────────────────────────
     #  포지션 조회
