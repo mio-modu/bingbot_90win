@@ -10,6 +10,7 @@ state.json
 state.json.bak
 engine_state.json
 trades.jsonl
+proposals/
 *_backup_*.json
 _archive_*/
 
