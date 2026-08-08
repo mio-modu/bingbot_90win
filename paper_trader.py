@@ -33,6 +33,7 @@ from typing import Optional
 import numpy as np
 
 import config
+import trade_journal
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,19 @@ class Position:
     # 급락 감지용 가격 히스토리: [timestamp, price, volume]
     price_hist:      list   = field(default_factory=list)
     low_vol_start:   float  = 0.0
+
+    # ── 저널용 계측 (매매 판단에는 일절 관여하지 않음) ──────────
+    # MFE = 보유 중 최대 유리 지점 / MAE = 최대 불리 지점 (순손익 $ 기준)
+    # 손실 거래의 MFE → "익절할 수 있었는데 놓친 폭"
+    # 익절 거래의 MAE → "손절선을 조이면 죽었을 거래"
+    mfe_usd:         float  = 0.0    # 최대 유리 순손익 ($)
+    mae_usd:         float  = 0.0    # 최대 불리 순손익 ($, 음수)
+    mfe_coin_pct:    float  = 0.0    # 그때의 코인 변화율
+    mae_coin_pct:    float  = 0.0
+    mfe_at_s:        float  = 0.0    # 진입 후 몇 초 만에 MFE 도달했는지
+    mae_at_s:        float  = 0.0
+    # DCA 단계 이력: [{step, at_s, price, add_usd, total_invested, kind}]
+    step_history:    list   = field(default_factory=list)
 
     @property
     def max_position(self) -> float:
@@ -229,8 +243,10 @@ class Position:
 
     # ── 물타기 실행 ──────────────────────────────────────────
 
-    def apply_avg_down(self, raw_price: float, add_usd: float):
-        """물타기: 슬리피지 적용 후 평균단가 재계산"""
+    def apply_avg_down(self, raw_price: float, add_usd: float, kind: str = "price"):
+        """물타기: 슬리피지 적용 후 평균단가 재계산
+        kind: 저널 기록용 발동 사유 ("price" = 가격 트리거 / "sideways" = 횡보 강제)
+        """
         fill_price = _apply_slip(raw_price, self.trend, entry=True)
         add_qty    = (add_usd * config.LEVERAGE) / fill_price
         prev_cost  = self.avg_price * self.total_qty
@@ -242,6 +258,16 @@ class Position:
         self.avg_down_step  += 1
         self.step_ref_pnl    = self.pnl_pct(fill_price)
         self.step_enter_time = time.time()   # 이 단계 진입 시각 기록
+
+        # 저널용 단계 이력 (어느 단계에서 돈이 새는지 분석)
+        self.step_history.append({
+            "step":           self.avg_down_step,
+            "at_s":           round(time.time() - self.open_time, 1),
+            "price":          round(fill_price, 8),
+            "add_usd":        round(add_usd, 2),
+            "total_invested": round(self.total_invested, 2),
+            "kind":           kind,
+        })
 
         if self.total_invested >= self.max_position:
             self.hard_cap_price = raw_price
@@ -475,6 +501,14 @@ class PaperTrader:
                 "pyramid_qty":      p.pyramid_qty,
                 "pyramid_invested": p.pyramid_invested,
                 "capital_at_open":  p.capital_at_open,
+                # 저널 계측 — 재시작해도 MAE/MFE·단계이력이 이어지도록 함께 저장
+                "mfe_usd":      p.mfe_usd,
+                "mae_usd":      p.mae_usd,
+                "mfe_coin_pct": p.mfe_coin_pct,
+                "mae_coin_pct": p.mae_coin_pct,
+                "mfe_at_s":     p.mfe_at_s,
+                "mae_at_s":     p.mae_at_s,
+                "step_history": p.step_history,
             }
         data = {
             "total_pnl":          self.total_pnl,
@@ -537,6 +571,13 @@ class PaperTrader:
                         pyramid_qty      = float(pd.get("pyramid_qty", 0.0)),
                         pyramid_invested = float(pd.get("pyramid_invested", 0.0)),
                         capital_at_open  = float(pd.get("capital_at_open", 0.0)),
+                        mfe_usd      = float(pd.get("mfe_usd", 0.0)),
+                        mae_usd      = float(pd.get("mae_usd", 0.0)),
+                        mfe_coin_pct = float(pd.get("mfe_coin_pct", 0.0)),
+                        mae_coin_pct = float(pd.get("mae_coin_pct", 0.0)),
+                        mfe_at_s     = float(pd.get("mfe_at_s", 0.0)),
+                        mae_at_s     = float(pd.get("mae_at_s", 0.0)),
+                        step_history = list(pd.get("step_history", [])),
                     )
                     # initial_invest 마이그레이션
                     # (구버전 state.json에 필드 없을 때 → 현재 config 시드로 설정)
@@ -636,6 +677,14 @@ class PaperTrader:
             crash_short     = crash_short,
             capital_at_open = self.total_capital + self.total_pnl,
         )
+        self.position.step_history.append({
+            "step":           0,
+            "at_s":           0.0,
+            "price":          round(fill_price, 8),
+            "add_usd":        round(invest, 2),
+            "total_invested": round(invest, 2),
+            "kind":           "crash_short" if crash_short else "entry",
+        })
         logger.info(
             f"{tag} {symbol} ({trend}) | 호가: {raw_price:.6f} → "
             f"체결가: {fill_price:.6f} | 투입: ${invest:.0f} | "
@@ -681,6 +730,33 @@ class PaperTrader:
             "duration_s":     round(time.time() - p.open_time, 1),
         }
         self.closed_trades.append(trade)
+
+        # ── 영구 저널 기록 (분석·진화용) ────────────────────────
+        # closed_trades 는 state.json 에서 최근 200건만 살아남으므로
+        # 학습 데이터는 trades.jsonl 에 별도로 append 한다.
+        journal_rec = dict(trade)
+        journal_rec.update({
+            "open_time":      round(p.open_time, 1),
+            "close_time":     round(time.time(), 1),
+            "open_kst":       trade_journal._iso(p.open_time),
+            "close_kst":      trade_journal._iso(time.time()),
+            "entry_price":    round(p.entry_price, 8),
+            "initial_invest": round(p.initial_invest, 2),
+            "leverage":       config.LEVERAGE,
+            "sideways_dca":   p.sideways_dca,
+            "crash_short":    p.crash_short,
+            "mfe_usd":        round(p.mfe_usd, 4),
+            "mae_usd":        round(p.mae_usd, 4),
+            "mfe_coin_pct":   round(p.mfe_coin_pct, 6),
+            "mae_coin_pct":   round(p.mae_coin_pct, 6),
+            "mfe_at_s":       round(p.mfe_at_s, 1),
+            "mae_at_s":       round(p.mae_at_s, 1),
+            "steps":          p.step_history,
+            "capital_before": round(self.total_capital + self.total_pnl - pnl, 2),
+            "capital_after":  round(self.total_capital + self.total_pnl, 2),
+        })
+        trade_journal.append(journal_rec)
+
         self.position = None
 
         icon = "✅" if pnl > 0 else "❌"
@@ -916,7 +992,7 @@ class PaperTrader:
             if not self._live_add(p.symbol, p.trend, add_qty):
                 logger.error(f"[횡보DCA건너뜀] {p.symbol} 실거래 주문 실패")
                 return
-        p.apply_avg_down(price, add_usd)
+        p.apply_avg_down(price, add_usd, kind="sideways")
         p.sideways_dca = True   # TP 조건을 단순 +1%로 전환
         self.save_state()
 
@@ -943,6 +1019,26 @@ class PaperTrader:
         self.position.price_hist.append((time.time(), price, volume))
         if len(self.position.price_hist) > 300:
             self.position.price_hist = self.position.price_hist[-300:]
+        self._track_excursion(price)
+
+    def _track_excursion(self, price: float):
+        """MFE/MAE 갱신 — 저널 분석 전용. 매매 판단에는 쓰이지 않는다."""
+        p = self.position
+        if not p:
+            return
+        try:
+            net   = p.net_pnl(price)
+            at_s  = time.time() - p.open_time
+            if net > p.mfe_usd:
+                p.mfe_usd      = net
+                p.mfe_coin_pct = p.coin_pct(price)
+                p.mfe_at_s     = at_s
+            if net < p.mae_usd:
+                p.mae_usd      = net
+                p.mae_coin_pct = p.coin_pct(price)
+                p.mae_at_s     = at_s
+        except Exception:
+            pass  # 계측 실패가 매매를 막아선 안 된다
 
     def is_flash_crash(self) -> bool:
         p = self.position

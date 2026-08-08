@@ -36,6 +36,31 @@ python close_all.py
 | `config.py` | 전 파라미터 |
 | `watchdog.py` | 봇 감시·자동재시작 (네트워크 단절 대응) |
 | `health_check.ps1` | 워치독 생존 확인(전역 뮤텍스 기준) 후 재기동 |
+| `trade_journal.py` | 청산 거래를 `trades.jsonl`에 영구 append (분석용 원장) |
+| `analyze.py` | 저널 기반 손실 분석 리포트 (읽기 전용) |
+
+## 손실 분석 (`analyze.py`)
+
+`state.json`의 `closed_trades`는 최근 200건에서 잘려 학습 이력이 소실되므로,
+청산 시마다 `trades.jsonl`에 한 줄씩 **영구 기록**한다. 기록에는 매매 판단에
+쓰이지 않는 계측값이 함께 담긴다.
+
+- **MFE** — 보유 중 최대 유리 지점. 손실 거래의 MFE = *놓친 익절*
+- **MAE** — 보유 중 최대 불리 지점. 익절 거래의 MAE = *손절선을 조이면 죽었을 폭*
+- **단계 이력** — DCA 각 단계의 시각·체결가·투입금·발동 사유(가격/횡보)
+
+```bash
+python analyze.py             # 전체 리포트
+python analyze.py --days 7    # 최근 7일
+python analyze.py --json      # 기계 판독용
+```
+
+리포트는 청산사유·DCA단계·코인·방향·시간대별 손익 귀속, 손익분기 승률,
+그리고 손절 한도 후보별 총손익 스캔을 출력한다.
+
+> 손절 스캔은 **근사치**다. 조기 손절 시 사라졌을 이후의 DCA·회복분을 반영하지
+> 않으므로 값 자체가 아니라 방향만 참고할 것. 표본 수십 건 미만에서는 우연을
+> 규칙으로 오인하기 쉽다.
 
 ## 실거래 설정 요점 ($1050 기준)
 
@@ -61,6 +86,6 @@ python close_all.py
 
 ## 주의
 
-- `.env`(API 키), `state.json`, `*.log`는 `.gitignore`로 제외된다. 커밋하지 말 것.
+- `.env`(API 키), `state.json`, `trades.jsonl`, `*.log`는 `.gitignore`로 제외된다. 커밋하지 말 것.
 - BingX **헤지 모드**(LONG/SHORT 동시 보유) 계정 설정이 필요하다.
 - 실제 자금이 움직인다. 파라미터 변경 후에는 반드시 `close_all.py` 사용법을 먼저 확인할 것.

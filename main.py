@@ -22,6 +22,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import trade_journal
 from config import MAIN_LOOP_INTERVAL_SEC, LOG_LEVEL, TOTAL_CAPITAL
 from strategy_engine import StrategyEngine
 
@@ -182,6 +183,9 @@ def main():
     logger.info("=" * 60)
     logger.info("  BingX Trading Bot 시작")
     logger.info("=" * 60)
+
+    # 저널이 아직 없으면 state.json 의 기존 기록을 1회 이관 (분석 이력 확보)
+    trade_journal.backfill_from_state()
 
     engine = StrategyEngine()
     status_interval = 60   # 60초마다 상태 출력
