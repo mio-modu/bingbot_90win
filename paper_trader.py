@@ -355,6 +355,21 @@ def _apply_slip(price: float, trend: str, entry: bool) -> float:
         return price * (1 - s) if trend == "UP" else price * (1 + s)
 
 
+def _order_id_of(result: dict) -> str:
+    """BingX 주문 응답에서 orderId 를 꺼낸다.
+    응답이 {"data": {"order": {...}}} 일 때도 있고 {"data": {...}} 일 때도 있다."""
+    try:
+        d = result.get("data", {}) or {}
+        if isinstance(d, dict):
+            o = d.get("order", d)
+            if isinstance(o, dict):
+                oid = o.get("orderId") or o.get("orderID") or ""
+                return str(oid) if oid else ""
+    except Exception:
+        pass
+    return ""
+
+
 # ────────────────────────────────────────────────────────────
 #  페이퍼 트레이더
 # ────────────────────────────────────────────────────────────
@@ -585,6 +600,24 @@ class PaperTrader:
         p.total_invested = (exch_qty * exch_avg) / config.LEVERAGE
         p.external_merge = True             # 이후 물타기 금지
 
+        # ★ 평단이 바뀌면 트레일링·고점 기록을 반드시 초기화해야 한다.
+        #   apply_avg_down 은 이미 이렇게 하고 있는데(같은 파일 참조),
+        #   여기서 빼먹었다가 실제로 사고가 났다:
+        #     사람이 추가 매수 → 평단 하락 → pnl_pct 가 순간적으로 급등 →
+        #     옛 고점 기준의 트레일이 즉시 활성화되고 곧바로 발동 →
+        #     2초 만에 "트레일익절"로 전량 시장가 청산.
+        #   새 평단에는 새 고점이 필요하다. 옛 고점은 다른 포지션의 것이다.
+        if p.trail_active or p.peak_realized:
+            logger.warning(
+                f"[외부개입] 트레일 초기화 — 평단이 바뀌었으므로 "
+                f"옛 고점({p.peak_price:.8f})·트레일SL({p.trail_sl:.8f})은 무효"
+            )
+        p.trail_active   = False
+        p.trail_sl       = 0.0
+        p.peak_price     = exch_avg
+        p.peak_realized  = 0.0
+        p.step_enter_time = time.time()
+
         logger.critical(
             f"[외부개입⚠] {p.symbol} 거래소 실물이 봇 장부와 다릅니다 "
             f"(차이 {diff:.0%}) — 거래소 기준으로 맞춥니다.\n"
@@ -746,11 +779,15 @@ class PaperTrader:
             logger.error(f"[실거래진입실패] {symbol}: {e}")
             return False
 
-    def _live_close(self, symbol: str, trend: str) -> bool:
-        """실거래 청산 주문 (헤지모드 LONG/SHORT). 성공 True / 실패 False
+    def _live_close(self, symbol: str, trend: str) -> tuple:
+        """실거래 청산 주문 (헤지모드 LONG/SHORT).
+
+        반환: (성공 여부, 주문 ID)
+        주문 ID 는 나중에 **실제 체결가**를 조회하는 데 쓴다. 추정 체결가로
+        장부를 쓰면 오차가 그대로 쌓인다 (실측 $64 차이).
         최대 3번 재시도. 포지션이 이미 없으면 성공으로 처리."""
         if not self.live_api or not config.LIVE_TRADING:
-            return True
+            return True, ""
         pos_side = "LONG" if trend == "UP" else "SHORT"
         # 거래소 실제 수량 조회 (closePosition=true 가 거부될 경우 대비)
         exchange_qty = None
@@ -769,7 +806,7 @@ class PaperTrader:
                 code = result.get("code", "?")
                 logger.info(f"[실거래청산] {symbol} {pos_side} code={code} (시도 {attempt+1}/3)")
                 if str(code) == "0":
-                    return True
+                    return True, _order_id_of(result)
                 logger.error(
                     f"[실거래청산오류] code={code} msg={result.get('msg','')} "
                     f"(시도 {attempt+1}/3)"
@@ -784,7 +821,7 @@ class PaperTrader:
                     )
                     if not still_open:
                         logger.info(f"[청산확인] {symbol} 거래소에 {pos_side} 포지션 없음 → 이미 청산됨")
-                        return True
+                        return True, ""
                 except Exception:
                     pass
             except Exception as e:
@@ -795,7 +832,51 @@ class PaperTrader:
             f"[청산완전실패⚠] {symbol} {pos_side} — 3번 재시도 후에도 실패! "
             f"거래소에서 수동 청산 필요!"
         )
-        return False
+        return False, ""
+
+    def _actual_fill_price(self, symbol: str, order_id: str) -> float:
+        """거래소에 **실제 체결가**를 물어본다. 못 얻으면 0.
+
+        왜 필요한가 (실측 사고)
+        ----------------------
+        봇은 체결가를 "마지막 시세 × 고정 슬리피지(0.05%)"로 추정해 왔다.
+        시장가 청산은 호가창을 먹고 들어가므로 실제로는 훨씬 나쁠 수 있다.
+
+            봇 추정 : 0.002692  →  장부 순손익 $+7.46  (승리로 기록)
+            실제    : 0.002662  →  실현 손익 $-56.56  (패배)
+
+        $64 오차가 한 거래에서 났다. 그리고 이 숫자가 누적손익·승패
+        카운터·거버너 자본·저널·확신도 학습까지 전부로 흘러간다.
+        추정값으로 학습하면 학습 자체가 거짓이 된다.
+
+        체결 반영에 잠깐 시간이 걸리므로 몇 번 재시도한다.
+        """
+        if not order_id or not self.live_api or not config.LIVE_TRADING:
+            return 0.0
+        if not getattr(config, "USE_ACTUAL_FILL_PRICE", True):
+            return 0.0
+        getter = getattr(self.live_api, "get_order", None)
+        if not callable(getter):
+            return 0.0
+        for attempt in range(config.FILL_QUERY_RETRIES):
+            try:
+                o = getter(symbol, order_id) or {}
+                for key in ("avgPrice", "averagePrice", "price"):
+                    v = o.get(key)
+                    if v in (None, "", 0, "0"):
+                        continue
+                    px = float(v)
+                    if px > 0:
+                        return px
+            except Exception as e:
+                logger.debug(f"[체결가조회] {symbol} 시도 {attempt+1} 실패: {e}")
+            if attempt < config.FILL_QUERY_RETRIES - 1:
+                time.sleep(config.FILL_QUERY_DELAY_S)
+        logger.warning(
+            f"[체결가조회] {symbol} 실제 체결가를 못 얻었습니다 (주문 {order_id}) "
+            f"— 추정값으로 기록합니다. 장부 대조에서 차이가 잡힐 수 있습니다."
+        )
+        return 0.0
 
     def _live_add(self, symbol: str, trend: str, qty: float) -> bool:
         """실거래 DCA 추가 주문 (헤지모드 LONG/SHORT). 성공 True / 실패 False"""
@@ -1090,14 +1171,27 @@ class PaperTrader:
             return {}
 
         # 실거래: 청산 주문 (실패 시 paper state 유지 — 수동 청산 후 봇 재시작 필요)
-        if not self._live_close(p.symbol, p.trend):
+        ok, close_oid = self._live_close(p.symbol, p.trend)
+        if not ok:
             return {}  # 청산 실패 → paper state 그대로 유지 (새 포지션 진입 차단)
 
         # 청산 성공 → 거래소에 남은 STOP 주문 정리.
         # 고아 STOP 이 남으면 같은 코인에 재진입했을 때 엉뚱한 가격에 오폭한다.
         self.clear_exchange_stop(p.symbol, p.stop_order_id)
 
-        fill_price = _apply_slip(raw_price, p.trend, entry=False)
+        # ★ 체결가는 **거래소에 물어본다.** 추정값은 최후의 수단이다.
+        est_price  = _apply_slip(raw_price, p.trend, entry=False)
+        real_price = self._actual_fill_price(p.symbol, close_oid)
+        fill_price = real_price if real_price > 0 else est_price
+        if real_price > 0 and est_price > 0:
+            gap = (real_price - est_price) / est_price
+            if abs(gap) >= config.FILL_GAP_WARN_RATIO:
+                logger.warning(
+                    f"[체결가차이⚠] {p.symbol} 추정 {est_price:.8f} vs "
+                    f"실제 {real_price:.8f} ({gap:+.2%}) — 시장가 슬리피지가 "
+                    f"설정값({config.SLIPPAGE_RATE:.2%})보다 큽니다. "
+                    f"실제 체결가로 기록합니다."
+                )
         pnl        = p.realized_pnl(fill_price)
         cost       = p._total_cost()
         self.total_pnl += pnl

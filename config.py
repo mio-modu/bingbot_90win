@@ -220,6 +220,22 @@ MAX_NET_LOSS_CAPITAL_RATIO = _env_float("MAX_NET_LOSS_CAPITAL_RATIO", 0.22)
 # -$440 에서야 발동한다. 자본 $500 에서 치명적이다.
 # 60초마다 도는 정합성 점검에서 수량 차이를 발견하면 **거래소를 진실로 삼아**
 # 수량·평단·투입금을 덮어쓰고, 백스톱을 다시 걸고, 물타기를 중단한다.
+# ────────────────────────────────────────────────
+#  실제 체결가 조회
+# ────────────────────────────────────────────────
+# 봇은 체결가를 "마지막 시세 × 고정 슬리피지"로 추정해 왔다. 시장가 청산은
+# 호가창을 먹고 들어가므로 추정과 실제가 크게 벌어질 수 있다.
+#   실측(2026-08-10 PUMP): 추정 0.002692 / 실제 0.002662 → $64 오차.
+#   봇은 +$7.46 승리로 기록했지만 거래소 실현손익은 -$56.56 이었다.
+# 이 숫자는 누적손익·승패·거버너 자본·저널·확신도 학습까지 전부로 흘러간다.
+# 추정값으로 학습하면 학습 자체가 거짓이 된다.
+USE_ACTUAL_FILL_PRICE = _env_bool("USE_ACTUAL_FILL_PRICE", True)
+FILL_QUERY_RETRIES  = _env_int("FILL_QUERY_RETRIES", 3)     # 체결 반영 대기
+FILL_QUERY_DELAY_S  = _env_float("FILL_QUERY_DELAY_S", 0.7)
+FILL_GAP_WARN_RATIO = _env_float("FILL_GAP_WARN_RATIO", 0.003)
+#   추정과 실제가 이 비율 이상 벌어지면 경고. 유동성이 얇은 코인을
+#   고르고 있다는 신호일 수 있다.
+
 POSITION_SYNC_ENABLED = _env_bool("POSITION_SYNC_ENABLED", True)
 POSITION_SYNC_MIN_DIFF_RATIO = _env_float("POSITION_SYNC_MIN_DIFF_RATIO", 0.10)
 #   수량 차이가 이 비율을 넘으면 개입으로 본다. 부분 체결·반올림 오차는

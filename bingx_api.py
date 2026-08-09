@@ -247,6 +247,21 @@ class BingXAPI:
             "quantity":     quantity,
         })
 
+    def get_order(self, symbol: str, order_id) -> dict:
+        """주문 1건 조회 — **실제 체결가**를 얻기 위한 것.
+
+        봇은 지금까지 체결가를 '마지막 시세 × 고정 슬리피지'로 추정해 왔다.
+        시장가 청산은 호가창을 먹고 들어가므로 추정과 실제가 크게 벌어질 수
+        있고, 그 차이가 그대로 장부 오차로 쌓인다.
+        (실측: 추정 0.002692 / 실제 0.002662 — 1.1% 차이, $64 오차)
+        """
+        data = self._get("/openApi/swap/v2/trade/order",
+                         {"symbol": symbol, "orderId": order_id})
+        d = data.get("data", {})
+        if isinstance(d, dict):
+            return d.get("order", d) or {}
+        return {}
+
     def get_open_orders(self, symbol: str = None) -> list:
         """미체결 주문 목록"""
         params = {}

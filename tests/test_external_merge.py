@@ -62,6 +62,13 @@ class FakeAPI:
     def get_open_orders(self, symbol=None):
         return []
 
+    # 체결 조회 — 실제 체결가를 돌려준다
+    fill_price = 0.0        # 0 이면 조회 실패를 흉내낸다
+    def get_order(self, symbol, order_id):
+        if self.fill_price <= 0:
+            raise RuntimeError("조회 실패 흉내")
+        return {"orderId": order_id, "avgPrice": str(self.fill_price)}
+
     # 기타
     def get_equity(self):                  return 500.0
     def get_balance(self):                 return 500.0
@@ -70,7 +77,8 @@ class FakeAPI:
     def get_contracts(self):               return []
     def set_leverage(self, *a, **k):       return {"code": 0}
     def place_order(self, *a, **k):        return {"code": 0}
-    def close_position(self, *a, **k):     return {"code": 0}
+    def close_position(self, *a, **k):
+        return {"code": 0, "data": {"order": {"orderId": "CLOSE-1"}}}
 
 
 def new_trader(tag, api):
@@ -233,9 +241,87 @@ def test_position_gone_still_closes_book():
         config.LIVE_TRADING = prev
 
 
+def test_trail_is_reset_when_average_changes():
+    """★ 실제 사고 재현 — 평단이 바뀌자 트레일이 즉시 발동해 전량 청산됐다
+
+    사람이 추가 매수 → 평단 하락 → pnl_pct 급등 → 옛 고점 기준 트레일이
+    곧바로 활성화·발동 → 2초 만에 '트레일익절' 로 시장가 전량 청산.
+    실제로는 -$56 손실이었다.
+    """
+    print("\n[8] ★ 평단이 바뀌면 트레일·고점을 초기화하는가")
+    api, pt, prev = setup("trail")
+    try:
+        p = pt.position
+        # 트레일이 활성화돼 고점을 들고 있는 상태를 만든다
+        p.trail_active  = True
+        p.peak_price    = p.avg_price * 1.05
+        p.trail_sl      = p.avg_price * 1.03
+        p.peak_realized = 8.0
+        print(f"    개입 전: 트레일 활성 / 고점 {p.peak_price:.8f} / "
+              f"SL {p.trail_sl:.8f}")
+
+        # 사람이 더 싸게 추가 매수 → 평단 하락
+        api.qty = p.total_qty * 4
+        api.avg = p.avg_price * 0.99
+        pt.reconcile_with_exchange()
+
+        p = pt.position
+        print(f"    개입 후: 트레일 활성 {p.trail_active} / "
+              f"고점 {p.peak_price:.8f} / SL {p.trail_sl:.8f} / "
+              f"고점순익 ${p.peak_realized:.2f}")
+        assert p.trail_active is False, "옛 트레일이 살아 있으면 즉시 오발동한다"
+        assert p.trail_sl == 0.0
+        assert abs(p.peak_price - api.avg) < 1e-12, "고점을 새 평단에서 다시 잡아야"
+        assert p.peak_realized == 0.0, "옛 고점 순수익이 남으면 수익보존락이 오발동"
+        assert p.is_trail_hit(api.avg) is False
+        print("    ✅ 새 평단에는 새 고점 — 오발동 차단")
+    finally:
+        config.LIVE_TRADING = prev
+
+
+def test_uses_actual_fill_price():
+    """★ 장부를 추정값이 아니라 거래소 실제 체결가로 쓴다"""
+    print("\n[9] ★ 청산 손익을 실제 체결가로 계산하는가")
+    api, pt, prev = setup("fill")
+    try:
+        p = pt.position
+        entry = p.avg_price
+        api.fill_price = entry * 0.98          # 실제로는 2% 낮게 체결됐다
+        # 봇이 보는 시세는 아직 진입가 근처 → 추정으로는 이익처럼 보인다
+        trade = pt.close_position(entry, "테스트청산")
+        print(f"    봇에 전달된 시세 {entry:.8f} / 실제 체결 {api.fill_price:.8f}")
+        print(f"    기록된 체결가 {trade['exit_price']:.8f} / "
+              f"순손익 ${trade['pnl']:+.2f}")
+        assert abs(trade["exit_price"] - api.fill_price) < 1e-6, \
+            "추정값으로 기록했다 — 장부가 거짓이 된다"
+        assert trade["pnl"] < 0, "실제로는 손실인데 이익으로 기록됐다"
+        print("    ✅ 거래소 실제 체결가로 기록")
+    finally:
+        config.LIVE_TRADING = prev
+
+
+def test_falls_back_to_estimate_when_query_fails():
+    """조회가 안 되면 추정값으로라도 장부를 닫아야 한다 (멈추면 안 됨)"""
+    print("\n[10] 체결가 조회 실패 시 추정값으로 진행")
+    api, pt, prev = setup("fillfail")
+    try:
+        p = pt.position
+        entry = p.avg_price
+        api.fill_price = 0.0                    # 조회 실패
+        trade = pt.close_position(entry, "테스트청산")
+        expected = entry * (1 - config.SLIPPAGE_RATE)
+        print(f"    기록된 체결가 {trade['exit_price']:.8f} "
+              f"(추정 {expected:.8f})")
+        assert abs(trade["exit_price"] - expected) < 1e-9
+        assert pt.position is None, "장부가 안 닫히면 신규 진입이 영영 막힌다"
+        print("    ✅ 추정값으로 닫되 경고를 남긴다")
+    finally:
+        config.LIVE_TRADING = prev
+
+
 def main():
     print("=" * 62)
-    print("  외부(사람) 개입 감지 테스트")
+    print("  외부(사람) 개입 · 체결가 정확도 테스트")
     print("=" * 62)
     for fn in [test_detects_manual_add,
                test_loss_is_now_measured_correctly,
@@ -243,7 +329,10 @@ def main():
                test_dca_stops_after_intervention,
                test_small_difference_is_ignored,
                test_survives_restart,
-               test_position_gone_still_closes_book]:
+               test_position_gone_still_closes_book,
+               test_trail_is_reset_when_average_changes,
+               test_uses_actual_fill_price,
+               test_falls_back_to_estimate_when_query_fails]:
         fn()
     print("\n" + "=" * 62)
     print("  전부 통과")
