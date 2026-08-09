@@ -98,6 +98,42 @@ BingX 서브계좌를 만들어 봇 자금만 옮기고 **그 서브계좌의 AP
 > 자본이 `CAPITAL_MISMATCH_ALERT_RATIO`(30%) 이상 어긋나면 API 키가 다른
 > 계좌를 가리키는 사고로 보고 `CRITICAL` 을 남긴다.
 
+## 안드로이드(Termux)에서 돌리기
+
+VPS 없이 폰에서 직접 돌리는 경우. `setup_termux.sh` 를 쓴다.
+
+```bash
+pkg install git
+git clone -b claude/github-push-time-check-ioamx1 \
+    https://github.com/mio-modu/bingbot_90win ~/bingx-bot
+cd ~/bingx-bot && bash setup_termux.sh
+```
+
+`numpy` 는 pip 로 빌드하면 안드로이드에서 실패하기 쉬워 `pkg install
+python-numpy` 로 설치한다. 설치 후 `run.sh` 와 Termux:Boot 자동시작
+스크립트가 생성되며, **봇은 자동으로 켜지지 않는다.**
+
+**켜기 전 반드시 세 가지** — 안 하면 안드로이드가 프로세스를 죽인다:
+
+1. 설정 → 앱 → Termux → 배터리 → **제한 없음**
+2. **Termux:Boot** 앱 설치(F-Droid) 후 1회 실행 — 재부팅 후 자동 시작
+3. `termux-wake-lock` — `run.sh` 가 자동으로 건다
+
+| 목적 | 명령 |
+|---|---|
+| 시작 | `cd ~/bingx-bot && ./run.sh` |
+| 백그라운드 시작 | `nohup ./run.sh > run.log 2>&1 &` |
+| 로그 | `tail -f ~/bingx-bot/bot.log` |
+| 중지 | `pkill -f watchdog.py` |
+| 긴급청산 | `python close_all.py` |
+| 갱신 | `git pull && pkill -f watchdog.py && ./run.sh` |
+
+> **VPS 만큼 안정적이지 않다.** 안드로이드는 메모리가 부족하면 예고 없이
+> 프로세스를 죽이고, 통신이 5G↔WiFi 로 바뀔 때 API 호출이 끊긴다.
+> 봇이 멈춰도 거래소에 걸어둔 `STOP_MARKET` 백스톱은 살아 있어 큰 손실은
+> 막히지만, 포지션이 방치되고 물타기·익절 관리가 끊긴다.
+> 재시작하면 `reconcile_with_exchange()` 가 유령 포지션을 정리한다.
+
 ## 클라우드 서버로 옮기기 (노트북 없이 24시간)
 
 노트북에서 돌리면 PC 를 끄거나 자리를 비우는 순간 봇이 멈추거나 방치된다.
