@@ -69,6 +69,23 @@ python tests/test_risk_governor.py # 개별
 > 그대로 두면 진입이 막혀 이길 기회가 없고, 이기지 못하니 카운터가 영영 안
 > 풀려 봇이 영구 정지된다. 낙폭 정지도 같다.
 
+## `.env` 로 설정 덮어쓰기
+
+자주 바뀌는 값은 `config.py` 대신 `.env` 에 적는다. `config.py` 를 직접 고치면
+`git pull` 할 때마다 충돌이 나고, 폰(Termux)에서는 편집 자체가 번거롭다.
+`.env` 는 `.gitignore` 대상이라 충돌하지 않는다.
+
+```ini
+BINGX_API_KEY=...
+BINGX_SECRET_KEY=...
+CAPITAL_AUTO_SYNC=true    # 봇 전용 서브계좌면 켠다
+TOTAL_CAPITAL=500         # 자동동기화를 켜면 필요 없다
+LEVERAGE=8
+LIVE_TRADING=false        # 실주문 끄고 관찰만
+```
+
+값이 숫자가 아니면 경고를 찍고 기본값을 쓴다 — 오타 하나로 봇이 죽지 않는다.
+
 ## 봇 전용 서브계좌 (권장)
 
 BingX 서브계좌를 만들어 봇 자금만 옮기고 **그 서브계좌의 API 키**를 쓴다.

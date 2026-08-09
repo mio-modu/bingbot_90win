@@ -6,6 +6,42 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
+
+# ────────────────────────────────────────────────
+#  .env 로 덮어쓸 수 있는 설정
+# ────────────────────────────────────────────────
+# 자주 바뀌는 값(자본·레버리지·실거래 여부)은 .env 에서 지정할 수 있다.
+# config.py 를 직접 고치면 git pull 할 때마다 충돌이 나고, 폰(Termux)에서는
+# 편집 자체가 번거롭다. .env 는 .gitignore 대상이라 충돌하지 않는다.
+#
+#   .env 예시
+#     BINGX_API_KEY=...
+#     BINGX_SECRET_KEY=...
+#     TOTAL_CAPITAL=500
+#     CAPITAL_AUTO_SYNC=true
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[config] {name}='{raw}' 를 숫자로 읽을 수 없어 기본값 {default} 사용")
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(_env_float(name, default))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
 # API 키 (.env 파일에서 불러옴 — 시세 조회 전용)
 API_KEY    = os.getenv("BINGX_API_KEY", "")
 SECRET_KEY = os.getenv("BINGX_SECRET_KEY", "")
@@ -16,9 +52,9 @@ BASE_URL   = "https://open-api.bingx.com"
 # ────────────────────────────────────────────────
 #  자금 설정
 # ────────────────────────────────────────────────
-TOTAL_CAPITAL        = 1050.0   # 총 자본 (USD) — 실거래 실보유금 기준 (거래소 잔고 $1062)
+TOTAL_CAPITAL        = _env_float("TOTAL_CAPITAL", 1050.0)   # 총 자본 (USD) — .env 로 덮어쓰기 가능
 INITIAL_POSITION_USD = 60.0     # 최초 진입 금액 ($60 = 동적시드 $1000 기준값)
-LEVERAGE             = 8        # 레버리지
+LEVERAGE             = _env_int("LEVERAGE", 8)               # 레버리지 — .env 로 덮어쓰기 가능
 
 # ────────────────────────────────────────────────
 #  수수료 & 슬리피지
@@ -198,7 +234,7 @@ LEDGER_DRIFT_WARN_USD = 5.0    # 이 이상 벌어지면 WARNING
 #
 # ⚠ 본계좌처럼 봇 외의 자금·입출금이 섞이는 계좌에서는 켜지 마라.
 #   입금을 "수익" 으로, 출금을 "손실" 로 오인하게 된다.
-CAPITAL_AUTO_SYNC = False
+CAPITAL_AUTO_SYNC = _env_bool("CAPITAL_AUTO_SYNC", False)
 
 # 봇 자본과 거래소 잔고가 이 비율 이상 어긋나면 CRITICAL 경고.
 # API 키가 다른 계좌를 가리키는 사고를 잡기 위한 것이다.
@@ -483,4 +519,4 @@ PARTIAL_DCA_MARGIN_BUFFER = 0.90   # 가용 마진의 90%만 사용 (10% 버퍼 
 # ────────────────────────────────────────────────
 #  실거래 모드
 # ────────────────────────────────────────────────
-LIVE_TRADING = True   # True = 실제 BingX 주문 / False = 페이퍼 트레이딩
+LIVE_TRADING = _env_bool("LIVE_TRADING", True)   # 실제 주문 / .env 로 끄기 가능
