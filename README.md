@@ -40,6 +40,7 @@ python close_all.py
 | `analyze.py` | 저널 기반 손실 분석 리포트 (읽기 전용) |
 | `evolve.py` | config 변경안 **제안만** 생성 (자동 적용 안 함) |
 | `import_history.py` | 다른 봇·다른 PC 의 과거 기록을 저널로 합치기 (읽기 전용) |
+| `find_bots.py` | 여러 봇 폴더 중 무엇이 실거래·실행 중인지 식별 (읽기 전용) |
 | `risk_governor.py` | 자본 보존 감독자 — 낙폭·연속손실·수익반납 시 시드 축소/중지 |
 | `LESSONS.md` | 과거 봇 8개 교차 분석 — 무엇이 왜 실패했는가 |
 | `tests/` | 안전장치 테스트 (실주문 없음 — 전부 가짜 거래소) |
@@ -66,6 +67,23 @@ python tests/test_risk_governor.py # 개별
 > `test_risk_governor.py` 의 데드락 검증이 가장 중요하다. "4연패 → 정지" 를
 > 그대로 두면 진입이 막혀 이길 기회가 없고, 이기지 못하니 카운터가 영영 안
 > 풀려 봇이 영구 정지된다. 낙폭 정지도 같다.
+
+## 어느 폴더가 실거래 봇인가 (`find_bots.py`)
+
+봇 폴더가 여러 개(백업·모의투자·실거래)면 무엇이 지금 돌고 있는지 헷갈린다.
+
+```bash
+python find_bots.py                        # 이 폴더부터
+python find_bots.py "C:\...\영상자동화"    # 상위 폴더 지정
+```
+
+`config.py + main.py` 가 함께 있는 폴더를 봇으로 보고, 각각에 대해
+`LIVE_TRADING`·자본·레버리지(정적 파싱, import 안 함), git 브랜치·마지막 커밋,
+`state.json` 누적손익·현재 포지션, 로그 최종 수정 시각을 보여준다.
+
+- **지금 돌고 있는 봇** = 로그가 가장 최근에 갱신된 폴더
+- `LIVE_TRADING=True` 폴더가 둘 이상이면 경고한다 — 동시에 켜지면 같은 계좌에
+  두 봇이 주문을 낸다
 
 ## 손실 분석 (`analyze.py`)
 
