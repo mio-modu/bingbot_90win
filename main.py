@@ -162,6 +162,38 @@ def _startup_menu():
             print("  1, 2, 3 중 하나를 입력하세요.")
 
 
+def _log_effective_thresholds(engine):
+    """실효 익절 기준을 '코인 몇 % 움직여야 하는가'로 환산해 기록한다.
+
+    MIN_PROFIT_USD 같은 절대 USD 임계값은 시드 크기에 비례해야 하는데,
+    다른 자본 규모의 config를 그대로 복사하면 이 기준만 조용히 몇 배로
+    틀어진다(로그상 정상, 익절만 안 됨). 시작할 때마다 찍어두면 즉시 보인다.
+    """
+    import config as _c
+    try:
+        seed     = engine.pt._get_initial_position_usd()
+        notional = seed * _c.LEVERAGE
+        cost     = notional * (_c.TAKER_FEE_RATE + _c.SLIPPAGE_RATE) * 2
+        need_pct = (_c.MIN_PROFIT_USD + cost) / notional * 100
+        mode = "실거래" if getattr(_c, "LIVE_TRADING", False) else "페이퍼"
+        logger.info(
+            f"[설정점검] {mode} | 자본 ${_c.TOTAL_CAPITAL:,.0f} | 시드 ${seed:,.2f} "
+            f"(명목 ${notional:,.0f} @{_c.LEVERAGE}x)"
+        )
+        logger.info(
+            f"[설정점검] 왕복비용 ${cost:.2f} | 최소순익 ${_c.MIN_PROFIT_USD:.2f} "
+            f"→ 익절에 필요한 코인 움직임 {need_pct:.3f}%"
+        )
+        if need_pct > 0.45:
+            logger.warning(
+                f"[설정경고⚠] 익절 기준 {need_pct:.3f}%가 과도합니다 — "
+                f"MIN_PROFIT_USD가 시드에 비해 너무 큽니다. 익절선에 못 닿고 "
+                f"교체로 밀려나며 수수료만 나갈 수 있습니다."
+            )
+    except Exception as e:
+        logger.debug(f"[설정점검] 실효 임계값 계산 실패: {e}")
+
+
 def _force_exit(sig, frame):
     os._exit(0)
 
@@ -184,6 +216,7 @@ def main():
     logger.info("=" * 60)
 
     engine = StrategyEngine()
+    _log_effective_thresholds(engine)
     status_interval = 60   # 60초마다 상태 출력
     last_status_time = 0.0
 
