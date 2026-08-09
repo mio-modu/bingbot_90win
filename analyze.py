@@ -183,6 +183,45 @@ def _excursion_report(trades: list[dict], min_profit: float) -> dict:
     }
 
 
+def _entry_quality(trades: list[dict]) -> list[dict]:
+    """진입 지표별 성적 — "어떤 조건의 코인이 실제로 이겼나"
+
+    각 지표를 중앙값으로 위/아래 두 묶음으로 갈라 성적을 비교한다.
+    분위수를 잘게 쪼개면 표본이 흩어져 우연이 커진다.
+    """
+    have = [t for t in trades if isinstance(t.get("entry_ctx"), dict) and t["entry_ctx"]]
+    if len(have) < 10:
+        return []
+
+    metrics = [
+        ("adx",           "ADX (추세 강도)"),
+        ("consistency",   "추세 일관성"),
+        ("score",         "스캐너 점수"),
+        ("atr_ratio",     "변동성 ATR"),
+        ("recent_vol_1h", "현재 변동성 1h"),
+        ("change_24h",    "24h 등락률"),
+    ]
+    out = []
+    for key, label in metrics:
+        vals = [(t["entry_ctx"][key], t) for t in have
+                if isinstance(t["entry_ctx"].get(key), (int, float))]
+        if len(vals) < 10:
+            continue
+        vals.sort(key=lambda x: x[0])
+        mid = len(vals) // 2
+        low  = [t for _, t in vals[:mid]]
+        high = [t for _, t in vals[mid:]]
+        if not low or not high:
+            continue
+        out.append({
+            "key": key, "label": label,
+            "cut": vals[mid][0],
+            "low":  _agg(low),
+            "high": _agg(high),
+        })
+    return out
+
+
 def _stop_scan(trades: list[dict]) -> list[dict]:
     """
     손절 한도 후보별 총손익 재시뮬레이션.
@@ -245,6 +284,7 @@ def build_report(trades: list[dict], min_profit: float = 2.0) -> dict:
                             lambda t: f"{_hour_kst(t):02d}시 (KST)")],
         "excursion":    _excursion_report(trades, min_profit),
         "estimated":    _estimated_missed(trades, min_profit),
+        "entry_quality": _entry_quality(trades),
         "by_source":    [(k, v) for k, v in _group(trades, lambda t: t.get("source_tag") or "live")],
         "stop_scan":    _stop_scan(trades),
     }
@@ -383,6 +423,19 @@ def print_report(rep: dict, min_profit: float, period_label: str):
         print(f"   합계                : ${est['missed_value']:,.2f}")
         print("   ※ peak_price 는 DCA 때마다 리셋되므로 실제 MFE 의 하한선이다.")
         print("     실제로 놓친 수익은 이보다 크다.")
+
+    eq = rep["entry_quality"]
+    if eq:
+        print("\n── 진입 지표별 성적 (어떤 코인이 실제로 이겼나) " + "─" * 9)
+        print("   각 지표를 중앙값으로 갈라 위/아래 성적을 비교한다.")
+        print(f"   {'지표':<18}{'기준':>10}{'낮은쪽':>22}{'높은쪽':>22}")
+        for m in eq:
+            lo, hi = m["low"], m["high"]
+            lo_s = f"{lo['n']}건 {lo['win_rate']*100:.0f}% ${lo['total']:+.0f}"
+            hi_s = f"{hi['n']}건 {hi['win_rate']*100:.0f}% ${hi['total']:+.0f}"
+            print(f"   {m['label']:<18}{m['cut']:>10.3f}{lo_s:>22}{hi_s:>22}")
+        print("   ※ 높은쪽이 뚜렷하게 좋으면 그 지표의 하한을 올릴 근거가 된다.")
+        print("     차이가 없으면 그 지표는 코인 선정에 도움이 안 된다는 뜻이다.")
 
     scan = rep["stop_scan"]
     if scan:

@@ -103,6 +103,10 @@ class Position:
     stop_order_id:   str    = ""
     stop_price:      float  = 0.0
 
+    # 진입 당시 코인 선정 지표 — "왜 이 코인을 골랐나" 를 결과와 대조하기 위한 기록.
+    # 이게 없으면 코인 선정이 좋았는지 나빴는지 영원히 알 수 없다.
+    entry_ctx:       dict   = field(default_factory=dict)
+
     @property
     def max_position(self) -> float:
         """하드캡: 진입 시 시드 × 20, 단 실제 보유 자본을 초과하지 않음"""
@@ -702,6 +706,7 @@ class PaperTrader:
                 "step_history": p.step_history,
                 "stop_order_id": p.stop_order_id,
                 "stop_price":    p.stop_price,
+                "entry_ctx":     p.entry_ctx,
             }
         data = {
             "total_pnl":          self.total_pnl,
@@ -774,6 +779,7 @@ class PaperTrader:
                         step_history = list(pd.get("step_history", [])),
                         stop_order_id = str(pd.get("stop_order_id", "")),
                         stop_price    = float(pd.get("stop_price", 0.0)),
+                        entry_ctx     = dict(pd.get("entry_ctx", {})),
                     )
                     # initial_invest 마이그레이션
                     # (구버전 state.json에 필드 없을 때 → 현재 config 시드로 설정)
@@ -861,7 +867,8 @@ class PaperTrader:
 
     def open_position(self, symbol: str, trend: str, raw_price: float,
                       invest_override: float = None,
-                      crash_short: bool = False) -> Optional[Position]:
+                      crash_short: bool = False,
+                      entry_ctx: dict = None) -> Optional[Position]:
         invest     = invest_override if invest_override is not None \
                      else self._get_initial_position_usd()
         fill_price = _apply_slip(raw_price, trend, entry=True)
@@ -890,6 +897,7 @@ class PaperTrader:
             step_enter_time = time.time(),
             crash_short     = crash_short,
             capital_at_open = self.total_capital + self.total_pnl,
+            entry_ctx       = dict(entry_ctx or {}),
         )
         self.position.step_history.append({
             "step":           0,
@@ -971,6 +979,7 @@ class PaperTrader:
             "mfe_at_s":       round(p.mfe_at_s, 1),
             "mae_at_s":       round(p.mae_at_s, 1),
             "peak_realized":  round(p.peak_realized, 4),
+            "entry_ctx":      p.entry_ctx,
             "steps":          p.step_history,
             "capital_before": round(self.total_capital + self.total_pnl - pnl, 2),
             "capital_after":  round(self.total_capital + self.total_pnl, 2),

@@ -17,7 +17,8 @@
 import logging
 import numpy as np
 from bingx_api import BingXAPI
-from config import MIN_VOLUME_USDT, MAX_VOLUME_USDT, TOP_N_COINS, MA_PERIOD, ADX_MIN_THRESHOLD
+from config import (MIN_VOLUME_USDT, MAX_VOLUME_USDT, TOP_N_COINS, MA_PERIOD,
+                    ADX_MIN_THRESHOLD, CONSISTENCY_MIN)
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,7 @@ class CoinScanner:
             "거래량부족": 0, "거래량초과": 0, "대형코인": 0,
             "블랙리스트": 0, "키워드제외": 0, "과열": 0,
             "데이터부족": 0, "ATR범위외": 0, "SIDEWAYS": 0,
-            "ADX부족": 0, "1h역행": 0, "1h변동성": 0, "15m변동성": 0,
+            "ADX부족": 0, "일관성부족": 0, "1h역행": 0, "1h변동성": 0, "15m변동성": 0,
         }
 
         for t in tickers:
@@ -371,7 +372,14 @@ class CoinScanner:
                 momentum_bonus = 1.3 if momentum_ok else 0.7
 
                 # ── 추세 일관성 (최근 10일봉 중 트렌드 방향 비율) ──
+                # MA 기울기는 UP 이라는데 10일 중 4일만 상승 마감이면 추세 라벨을
+                # 믿을 수 없다. 지금까지 점수 보너스로만 쓰이고 하한이 없었다.
                 consistency      = calc_trend_consistency(closes_d, trend, period=10)
+                if consistency < CONSISTENCY_MIN:
+                    _f["일관성부족"] += 1
+                    logger.debug(f"{symbol} 일관성 부족 제외: {consistency:.0%} "
+                                 f"< {CONSISTENCY_MIN:.0%}")
+                    continue
                 # 0.5(50%)~1.5(100%) 범위 보정: 70% 이상이면 보너스
                 consistency_bonus = 0.5 + consistency
 

@@ -31,6 +31,26 @@ from config import (
 
 ENGINE_STATE_FILE = os.path.join(os.path.dirname(__file__), "engine_state.json")
 
+
+# 저널에 남길 코인 선정 지표 — 스캐너가 뽑아준 값 중 판단 근거가 된 것들
+_CTX_KEYS = ("score", "adx", "consistency", "atr_ratio", "recent_vol_1h",
+             "change_24h", "momentum_ok", "trend_4h", "trend_1h",
+             "slope_d", "slope_1h", "volume")
+
+
+def _entry_ctx(coin: dict) -> dict:
+    """진입 당시 코인 지표를 추려 저널용 dict 로"""
+    if not isinstance(coin, dict):
+        return {}
+    out = {}
+    for k in _CTX_KEYS:
+        v = coin.get(k)
+        if isinstance(v, float):
+            v = round(v, 6)
+        if v is not None:
+            out[k] = v
+    return out
+
 logger = logging.getLogger(__name__)
 
 
@@ -549,7 +569,8 @@ class StrategyEngine:
             f"재진입 {self._crash_retry_count}/{CRASH_MAX_RETRIES}회차"
         )
         result = self.pt.open_position(coin["symbol"], "DOWN", price,
-                                       invest_override=invest, crash_short=True)
+                                       invest_override=invest, crash_short=True,
+                                       entry_ctx=_entry_ctx(coin))
         if result is None:
             logger.error(f"[급락SHORT실패] {coin['symbol']} — 실거래 주문 거부")
             return
@@ -600,7 +621,10 @@ class StrategyEngine:
                 logger.warning(f"[포지션확인실패] 거래소 포지션 조회 오류: {e}")
 
         price  = self.api.get_price(symbol)
-        result = self.pt.open_position(symbol, trend, price)
+        # 코인 선정 지표를 함께 넘긴다 — 나중에 결과와 대조해
+        # "어떤 조건의 코인이 실제로 이겼나" 를 숫자로 볼 수 있다.
+        result = self.pt.open_position(symbol, trend, price,
+                                       entry_ctx=_entry_ctx(coin))
         if result is None:
             logger.error(f"[진입실패] {symbol} — 실거래 주문 거부, 다음 틱에 재스캔")
             return
