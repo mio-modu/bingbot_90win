@@ -102,6 +102,10 @@ class Position:
     # 거래소 강제 손절 주문 (봇이 죽어도 거래소가 집행하는 백스톱)
     stop_order_id:   str    = ""
     stop_price:      float  = 0.0
+    # 사람이 같은 계좌에서 이 코인을 손으로 매매해 봇 장부와
+    # 어긋난 적이 있는가. True 면 물타기를 더 하지 않는다 —
+    # 사람이 비중을 바꾼 포지션에 봇이 계획대로 더 태우면 안 된다.
+    external_merge:  bool   = False
 
     # 진입 당시 코인 선정 지표 — "왜 이 코인을 골랐나" 를 결과와 대조하기 위한 기록.
     # 이게 없으면 코인 선정이 좋았는지 나빴는지 영원히 알 수 없다.
@@ -508,11 +512,15 @@ class PaperTrader:
             logger.debug(f"[정합성] 포지션 조회 실패(건너뜀): {e}")
             return False   # 조회 실패를 "포지션 없음"으로 오판하면 안 된다
 
-        still_open = any(
-            x.get("positionSide") == pos_side and float(x.get("positionAmt", 0)) != 0
-            for x in positions
+        live = next(
+            (x for x in positions
+             if x.get("positionSide") == pos_side
+             and float(x.get("positionAmt", 0) or 0) != 0),
+            None
         )
-        if still_open:
+        if live is not None:
+            # 포지션은 살아 있다. 다만 **크기**가 봇 장부와 같은지 봐야 한다.
+            self._adopt_external_size(live)
             return False
 
         # 체결가 추정: 백스톱이 걸려 있었다면 그 가격에서 나갔을 가능성이 높다
@@ -529,6 +537,73 @@ class PaperTrader:
             f"(실제 체결가와 다를 수 있으니 거래소 내역과 대조할 것)"
         )
         self.close_position(est_price, "거래소청산감지(백스톱추정)")
+        return True
+
+    def _adopt_external_size(self, live: dict) -> bool:
+        """거래소 포지션이 봇 장부보다 크거나 작으면 **거래소를 진실로 삼는다.**
+
+        왜 필요한가 (실제 상황)
+        ----------------------
+        사람이 같은 계좌에서 같은 코인을 손으로 추가 매수했다.
+        봇 장부: $40 / 거래소 실물: $160.
+
+        그대로 두면 세 가지가 동시에 망가진다.
+
+          1. 손익 계산이 1/4 로 축소된다.
+             봇은 자기 수량으로 손익을 재므로, 장부상 -$110 손절선이
+             실제로는 -$440 에서야 발동한다. 자본 $500 에서 치명적이다.
+          2. 거래소 백스톱 STOP_MARKET 이 봇 수량으로 걸려 있어
+             체결돼도 1/4 만 닫히고 나머지는 그대로 남는다.
+          3. 물타기 사다리가 이미 무의미해진다 — 사람이 임의로
+             비중을 바꿨으므로 봇이 세운 계획은 폐기해야 한다.
+
+        그래서 수량·평단·투입금을 거래소 값으로 덮어쓰고, 백스톱을 다시
+        걸고, **더 이상 물타기를 하지 않는다.**
+        사람이 개입한 포지션에 봇이 계획대로 더 태우면 안 된다.
+        """
+        p = self.position
+        if p is None or not config.POSITION_SYNC_ENABLED:
+            return False
+        try:
+            exch_qty = abs(float(live.get("positionAmt", 0) or 0))
+            exch_avg = float(live.get("avgPrice", 0) or live.get("entryPrice", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        if exch_qty <= 0 or p.total_qty <= 0:
+            return False
+
+        diff = abs(exch_qty - p.total_qty) / p.total_qty
+        if diff < config.POSITION_SYNC_MIN_DIFF_RATIO:
+            return False
+
+        old_qty, old_inv, old_avg = p.total_qty, p.total_invested, p.avg_price
+        if exch_avg <= 0:
+            exch_avg = p.avg_price          # 평단을 못 받으면 기존 값 유지
+
+        p.total_qty      = exch_qty
+        p.avg_price      = exch_avg
+        p.total_invested = (exch_qty * exch_avg) / config.LEVERAGE
+        p.external_merge = True             # 이후 물타기 금지
+
+        logger.critical(
+            f"[외부개입⚠] {p.symbol} 거래소 실물이 봇 장부와 다릅니다 "
+            f"(차이 {diff:.0%}) — 거래소 기준으로 맞춥니다.\n"
+            f"    수량   {old_qty:,.0f} → {exch_qty:,.0f}\n"
+            f"    평단   {old_avg:.8f} → {exch_avg:.8f}\n"
+            f"    투입   ${old_inv:,.2f} → ${p.total_invested:,.2f}\n"
+            f"    사람이 같은 코인을 손으로 매매한 것으로 보입니다.\n"
+            f"    이 포지션은 **물타기를 중단**하고 손절·익절만 관리합니다."
+        )
+        # 백스톱을 새 수량으로 다시 건다. 옛 수량으로 걸린 STOP 은
+        # 체결돼도 일부만 닫혀서 오히려 위험하다.
+        try:
+            self.clear_exchange_stop(p.symbol, p.stop_order_id)
+            p.stop_order_id = ""
+            p.stop_price    = 0.0
+            self.sync_exchange_stop()
+        except Exception as e:
+            logger.error(f"[외부개입] 백스톱 재설정 실패 — 수동 확인 필요: {e}")
+        self.save_state()
         return True
 
     def sync_capital_with_exchange(self) -> bool:
@@ -782,6 +857,7 @@ class PaperTrader:
                 "step_history": p.step_history,
                 "stop_order_id": p.stop_order_id,
                 "stop_price":    p.stop_price,
+                "external_merge": p.external_merge,
                 "entry_ctx":     p.entry_ctx,
             }
         data = {
@@ -855,6 +931,7 @@ class PaperTrader:
                         step_history = list(pd.get("step_history", [])),
                         stop_order_id = str(pd.get("stop_order_id", "")),
                         stop_price    = float(pd.get("stop_price", 0.0)),
+                        external_merge = bool(pd.get("external_merge", False)),
                         entry_ctx     = dict(pd.get("entry_ctx", {})),
                     )
                     # initial_invest 마이그레이션
@@ -1252,6 +1329,12 @@ class PaperTrader:
     def should_avg_down(self, price: float) -> bool:
         p = self.position
         if not p:
+            return False
+        # 사람이 손으로 이 코인을 매매해 봇 장부와 어긋난 적이 있으면
+        # 물타기를 더 하지 않는다. 봇이 세운 사다리는 이미 무의미하고,
+        # 사람이 바꿔놓은 비중 위에 계획대로 더 태우면 위험만 커진다.
+        # 손절·익절은 계속 관리한다.
+        if p.external_merge:
             return False
         if p.total_invested >= p.max_position:
             return False

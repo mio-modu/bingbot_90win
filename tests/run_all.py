@@ -22,6 +22,7 @@ SUITE = [
     ("최근 흐름 엔진",         "test_recency.py"),
     ("코인 선정 · 장부 대조",  "test_coin_scanner.py"),
     ("손절 분석 엔진",         "test_loss_autopsy.py"),
+    ("외부(사람) 개입 감지",   "test_external_merge.py"),
     ("엔진 기동 스모크",       "test_engine_smoke.py"),
 ]
 

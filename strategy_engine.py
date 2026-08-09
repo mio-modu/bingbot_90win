@@ -1097,7 +1097,10 @@ class StrategyEngine:
                         (p.trend == "DOWN" and price > p.avg_price)
             is_last_stage = (p.avg_down_step == config.MAX_DCA_STAGES)
 
+            # 사람이 손으로 이 코인을 매매해 봇 장부와 어긋난 적이 있으면
+            # 횡보 강제 물타기도 하지 않는다 (should_avg_down 과 같은 이유).
             if (below_avg and
+                    not p.external_merge and
                     p.avg_down_step >= SIDEWAYS_DCA_MIN_STEP and
                     p.avg_down_step <= config.MAX_DCA_STAGES and
                     p.step_enter_time > 0):

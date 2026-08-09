@@ -211,6 +211,20 @@ MAX_NET_LOSS_CAPITAL_RATIO = _env_float("MAX_NET_LOSS_CAPITAL_RATIO", 0.22)
 # 처음부터 크게 싣는다.** 시드가 커지면 하드캡(=보유 자본)에 더 빨리
 # 닿으므로 물타기 사다리는 자연히 얕아진다 — 이것도 유리하다.
 # 손실이 커진 건 언제나 고단계 물타기였다.
+# ────────────────────────────────────────────────
+#  외부(사람) 개입 감지
+# ────────────────────────────────────────────────
+# 같은 계좌에서 사람이 손으로 같은 코인을 매매하면 봇 장부와 거래소 실물이
+# 어긋난다. 실제로 봇 $40 / 실물 $160 인 상황이 발생했다.
+# 그대로 두면 봇은 자기 수량으로 손익을 재므로 -$110 손절선이 실제로는
+# -$440 에서야 발동한다. 자본 $500 에서 치명적이다.
+# 60초마다 도는 정합성 점검에서 수량 차이를 발견하면 **거래소를 진실로 삼아**
+# 수량·평단·투입금을 덮어쓰고, 백스톱을 다시 걸고, 물타기를 중단한다.
+POSITION_SYNC_ENABLED = _env_bool("POSITION_SYNC_ENABLED", True)
+POSITION_SYNC_MIN_DIFF_RATIO = _env_float("POSITION_SYNC_MIN_DIFF_RATIO", 0.10)
+#   수량 차이가 이 비율을 넘으면 개입으로 본다. 부분 체결·반올림 오차는
+#   보통 1% 미만이라 10% 면 넉넉하다.
+
 CONVICTION_SIZING_ENABLED = _env_bool("CONVICTION_SIZING_ENABLED", True)
 CONVICTION_MIN_MULT = _env_float("CONVICTION_MIN_MULT", 0.60)   # 애매한 자리
 CONVICTION_MAX_MULT = _env_float("CONVICTION_MAX_MULT", 1.35)   # 확신 있는 자리
