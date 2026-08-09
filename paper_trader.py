@@ -527,6 +527,41 @@ class PaperTrader:
         self.close_position(est_price, "거래소청산감지(백스톱추정)")
         return True
 
+    def reconcile_balance(self) -> float | None:
+        """봇 장부와 거래소 실제 잔고를 대조한다 → 차이(USD), 대조 불가면 None
+
+        왜 필요한가
+          체결가를 거래소에서 받아오지 않고 _apply_slip() 으로 **추정**한다.
+          그래서 장부의 total_pnl 은 실제 손익과 조금씩 어긋나고, 거래가
+          쌓일수록 그 오차가 누적된다. 봇이 "-$20" 이라고 해도 실제 계좌는
+          다를 수 있다는 뜻이다.
+
+          포지션 보유 중에는 미실현 손익 때문에 단순 비교가 안 되므로
+          **포지션이 없을 때만** 대조한다.
+        """
+        if self.position is not None:
+            return None
+        if not self.live_api or not config.LIVE_TRADING:
+            return None
+        try:
+            exch = self.live_api.get_equity()
+        except Exception as e:
+            logger.debug(f"[장부대조] 잔고 조회 실패(건너뜀): {e}")
+            return None
+        if exch <= 0:
+            return None
+
+        book = self.total_capital + self.total_pnl
+        diff = exch - book
+        level = logger.warning if abs(diff) >= config.LEDGER_DRIFT_WARN_USD else logger.info
+        level(
+            f"[장부대조] 봇 ${book:,.2f} vs 거래소 ${exch:,.2f} | "
+            f"차이 ${diff:+,.2f}"
+            + ("  ← 체결가 추정 오차 누적. 거래소 값이 진실이다."
+               if abs(diff) >= config.LEDGER_DRIFT_WARN_USD else "")
+        )
+        return diff
+
     def clear_exchange_stop(self, symbol: str, order_id: str = None):
         """청산 후 남은 STOP 주문 정리 (고아 주문이 다음 포지션을 오폭하지 않도록)"""
         if not self.live_api or not config.LIVE_TRADING:

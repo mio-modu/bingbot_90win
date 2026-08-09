@@ -80,8 +80,8 @@ class BingXAPI:
     # ────────────────────────────────────────────────
     #  잔고
     # ────────────────────────────────────────────────
-    def get_balance(self) -> float:
-        """사용 가능한 USDT 잔고 반환"""
+    def _usdt_balance_raw(self) -> dict:
+        """USDT 잔고 원본 dict (없으면 빈 dict)"""
         data = self._get("/openApi/swap/v2/user/balance")
         bal = data.get("data", {}).get("balance", [])
         # BingX 응답이 dict 단건 / list 두 형태 모두 관측됨 → 양쪽 지원
@@ -89,7 +89,28 @@ class BingXAPI:
             bal = [bal]
         for asset in bal:
             if isinstance(asset, dict) and asset.get("asset") == "USDT":
-                return float(asset.get("availableMargin", 0))
+                return asset
+        return {}
+
+    def get_balance(self) -> float:
+        """사용 가능한 USDT 잔고 (마진에 묶인 금액 제외)"""
+        return float(self._usdt_balance_raw().get("availableMargin", 0) or 0)
+
+    def get_equity(self) -> float:
+        """계좌 순자산 (미실현 손익 포함, 마진 포함)
+
+        봇 장부와 대조할 때 쓴다. availableMargin 은 포지션에 묶인 마진이
+        빠져 있어서 보유 중에는 장부와 비교할 수 없다.
+        BingX 는 equity 를 주지만 필드가 없을 때를 대비해 단계적으로 대체한다.
+        """
+        raw = self._usdt_balance_raw()
+        for key in ("equity", "balance", "availableMargin"):
+            v = raw.get(key)
+            if v not in (None, ""):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
         return 0.0
 
     # ────────────────────────────────────────────────

@@ -90,16 +90,31 @@ def calc_adx(klines: list, period: int = 14) -> float:
     if len(tr_list) < period:
         return 0.0
 
-    def wilder(data: list, n: int) -> list:
-        """Wilder 평활화 (Wilder's Smoothing)"""
+    def wilder_sum(data: list, n: int) -> list:
+        """Wilder 누적 평활 — TR·DM 용.
+        DI 계산에서 서로 나누므로 누적 형태여도 비율은 정확하다."""
         s = [sum(data[:n])]
         for v in data[n:]:
             s.append(s[-1] - s[-1] / n + v)
         return s
 
-    atr_s = wilder(tr_list, period)
-    pdm_s = wilder(plus_dm, period)
-    mdm_s = wilder(minus_dm, period)
+    def wilder_avg(data: list, n: int) -> list:
+        """Wilder 이동평균 — ADX(=DX 의 평균) 용.
+
+        ⚠ 여기에 wilder_sum 을 쓰면 값이 n배(=14배) 부풀려진다.
+          완벽한 추세에서 DX 는 매 봉 100 이고, 누적형은 1400 을 낸다.
+          그러면 ADX 가 항상 상한(0~100)을 훌쩍 넘어
+          adx_bonus = min(adx/25, 2.0) 이 늘 2.0 으로 고정되고,
+          ADX 필터도 사실상 무력해진다.
+        """
+        a = [sum(data[:n]) / n]
+        for v in data[n:]:
+            a.append((a[-1] * (n - 1) + v) / n)
+        return a
+
+    atr_s = wilder_sum(tr_list, period)
+    pdm_s = wilder_sum(plus_dm, period)
+    mdm_s = wilder_sum(minus_dm, period)
 
     dx_list = []
     for a, p, m in zip(atr_s, pdm_s, mdm_s):
@@ -113,7 +128,7 @@ def calc_adx(klines: list, period: int = 14) -> float:
     if len(dx_list) < period:
         return 0.0
 
-    adx_s = wilder(dx_list, period)
+    adx_s = wilder_avg(dx_list, period)
     return round(adx_s[-1], 2) if adx_s else 0.0
 
 
@@ -194,7 +209,7 @@ class CoinScanner:
             "거래량부족": 0, "거래량초과": 0, "대형코인": 0,
             "블랙리스트": 0, "키워드제외": 0, "과열": 0,
             "데이터부족": 0, "ATR범위외": 0, "SIDEWAYS": 0,
-            "1h역행": 0, "1h변동성": 0, "15m변동성": 0,
+            "ADX부족": 0, "1h역행": 0, "1h변동성": 0, "15m변동성": 0,
         }
 
         for t in tickers:
@@ -259,8 +274,16 @@ class CoinScanner:
                     _f["SIDEWAYS"] += 1
                     continue
 
-                # ── 3.5. ADX 추세 강도 계산 (점수 보너스만)
+                # ── 3.5. ADX 추세 강도 ──────────────────────
+                # config 는 "ADX 이하 = 추세 없음 → 진입 차단" 이라고 정의하는데
+                # 실제로는 점수 보너스로만 쓰이고 필터가 없었다 (import 만 하고 미사용).
+                # ADX 5 짜리 완전 횡보 코인도 통과하던 구멍이다.
+                # 물타기 전략은 추세가 있어야 회복하므로 횡보 코인이 가장 위험하다.
                 adx = calc_adx(daily)
+                if adx < ADX_MIN_THRESHOLD:
+                    _f["ADX부족"] += 1
+                    logger.debug(f"{symbol} ADX 부족 제외: {adx:.1f} < {ADX_MIN_THRESHOLD}")
+                    continue
 
                 # ── 4. 단기 트렌드 정렬 (4h + 1h) ──────────
                 slope_4h = slope_1h = 0.0
@@ -400,10 +423,10 @@ class CoinScanner:
             f"→ 점수기준({MIN_SCORE}) 통과 {len(qualified)}개 "
             f"→ 상위 {len(top)}개"
         )
-        # 필터별 탈락 통계 (조건 통과 0개일 때 원인 파악용)
-        if len(candidates) == 0:
-            stats = " / ".join(f"{k}:{v}" for k, v in _f.items() if v > 0)
-            logger.info(f"  [필터통계] {stats if stats else '전부통과(점수미달)'}")
+        # 필터별 탈락 통계 — 항상 남긴다.
+        # 어떤 필터가 실제로 일하고 있는지 봐야 선정 기준을 판단할 수 있다.
+        stats = " / ".join(f"{k}:{v}" for k, v in _f.items() if v > 0)
+        logger.info(f"  [필터통계] {stats if stats else '탈락 없음'}")
 
         if not top:
             logger.info(f"  ※ 최소 점수({MIN_SCORE}) 충족 코인 없음 → 진입 대기")

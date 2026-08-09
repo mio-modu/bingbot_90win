@@ -19,6 +19,7 @@ SUITE = [
     ("리스크 거버너",          "test_risk_governor.py"),
     ("수익 보존 락",           "test_profit_lock.py"),
     ("과거 기록 가져오기",     "test_import_history.py"),
+    ("코인 선정 · 장부 대조",  "test_coin_scanner.py"),
     ("엔진 기동 스모크",       "test_engine_smoke.py"),
 ]
 

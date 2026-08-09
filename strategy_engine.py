@@ -51,6 +51,7 @@ class StrategyEngine:
         self._last_scan_time  = 0.0
         self._last_exit_time  = 0.0
         self._last_reconcile_time = 0.0   # 거래소 정합성 점검 주기 타이머
+        self._last_ledger_check   = 0.0   # 장부 대조 주기 타이머
         self._current_coin_enter_time = (
             self.pt.position.open_time if self.pt.position else 0.0
         )
@@ -673,6 +674,16 @@ class StrategyEngine:
                     return
             except Exception as e:
                 logger.warning(f"[정합성] 점검 중 오류(무시): {e}")
+
+        # ── 장부 대조 (포지션 없을 때만, 기본 30분 주기) ──
+        # 체결가가 추정값이라 장부와 실제 잔고가 서서히 어긋난다.
+        if (self.pt.position is None and config.LIVE_TRADING
+                and now - self._last_ledger_check >= config.LEDGER_RECONCILE_MIN * 60):
+            self._last_ledger_check = now
+            try:
+                self.pt.reconcile_balance()
+            except Exception as e:
+                logger.debug(f"[장부대조] 오류(무시): {e}")
 
         # ── 매 틱: BTC 가격 히스토리 업데이트 (시장충격 감지용) ──
         btc_shock_this_tick = self._update_btc_and_check_shock()
