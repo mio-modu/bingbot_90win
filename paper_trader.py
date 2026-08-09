@@ -922,7 +922,20 @@ class PaperTrader:
             seed = self.position.initial_invest
         else:
             seed = self._get_initial_position_usd()
-        cap  = min(seed * config.MAX_NET_LOSS_SEED_MULT, config.MAX_NET_LOSS_CEILING)
+        cap = min(seed * config.MAX_NET_LOSS_SEED_MULT, config.MAX_NET_LOSS_CEILING)
+
+        # 자본 대비 상한. 시드×4 / 천장 두 가지만으로는 자본이 작을 때
+        # 1회 손실이 자본의 절반까지 갈 수 있다.
+        # 보유 중에는 **진입 당시 자본**을 쓴다. 지금 자본으로 계산하면
+        # 손실이 커질수록 손절선이 함께 당겨져 스스로를 조기 손절한다.
+        ratio = getattr(config, "MAX_NET_LOSS_CAPITAL_RATIO", 0.0)
+        if ratio > 0:
+            if self.position and self.position.capital_at_open > 0:
+                base_capital = self.position.capital_at_open
+            else:
+                base_capital = self.total_capital + self.total_pnl
+            if base_capital > 0:
+                cap = min(cap, base_capital * ratio)
         return -cap
 
     def open_position(self, symbol: str, trend: str, raw_price: float,

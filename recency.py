@@ -248,6 +248,72 @@ def momentum_ratio(closes: list, trend: str, half: int = 3) -> float:
 # ────────────────────────────────────────────────────────────
 #  종합 판정
 # ────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────
+#  확신도 — 자리가 좋으면 크게, 애매하면 작게
+# ────────────────────────────────────────────────────────────
+def conviction(coin: dict, lo: float = 0.6, hi: float = 1.35) -> tuple:
+    """
+    스캐너가 뽑아준 지표만 보고 시드 배율을 정한다.
+
+    왜 이게 "공격적"인가
+    --------------------
+    지금까지는 자리가 좋든 나쁘든 시드가 같았다. 그래서 확신 있는
+    자리에서도 조금만 먹고, 애매한 자리에서도 똑같이 크게 잃었다.
+    실측 데이터가 그 결과를 보여준다 — 승률 88% 에 손익 -$277.
+
+    진입 횟수를 늘리는 건 그 패턴을 키울 뿐이다. 대신 **좋은 자리에
+    더 싣는다.** 시드가 커지면 max_position(=자본 한도)에 더 빨리
+    닿으므로 물타기 사다리는 자연히 얕아진다. 이것도 유리한 방향이다.
+    손실이 커지는 건 언제나 고단계 물타기였다.
+
+    반환: (배율, 사유 목록)
+    """
+    m = 1.0
+    why = []
+
+    def num(key):
+        """값이 없거나 숫자가 아니면 None. 없는 근거로 시드를 키우지 않는다."""
+        v = coin.get(key)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    if coin.get("dir_agree"):
+        m += 0.20; why.append("15m·1h 일치 +20%")
+
+    adx = num("adx")
+    if adx is not None:
+        if adx >= 30:
+            m += 0.20; why.append(f"ADX {adx:.0f} +20%")
+        elif adx < 20:
+            m -= 0.10; why.append(f"ADX {adx:.0f} -10%")
+
+    # 신장도가 작다 = 평균 근처 = 되돌림 여유가 남아 있다
+    ext = num("fresh_ext")
+    if ext is not None:
+        if ext <= 0.5:
+            m += 0.15; why.append(f"평균 근처 {ext:+.1f}ATR +15%")
+        elif ext >= 1.8:
+            m -= 0.20; why.append(f"이미 벌어짐 {ext:+.1f}ATR -20%")
+
+    mom = num("fresh_mom")
+    if mom is not None:
+        if mom >= 1.5:
+            m += 0.15; why.append(f"가속 {mom:.1f} +15%")
+        elif mom < 0.5:
+            m -= 0.15; why.append(f"둔화 {mom:.1f} -15%")
+
+    cons = num("consistency")
+    if cons is not None and cons >= 0.7:
+        m += 0.10; why.append(f"일관성 {cons:.0%} +10%")
+
+    m = max(lo, min(hi, m))
+    return round(m, 3), why
+
+
 def freshness_verdict(price: float, closes_1h: list, hl_1h: list, trend: str,
                       max_extension_atr: float,
                       max_age: int,

@@ -472,6 +472,7 @@ class CoinScanner:
                     "symbol":        symbol,
                     "trend":         trend,
                     "dir_src":       dir_src,
+                    "dir_agree":     dir_agree,
                     "trend_4h":      trend_4h,
                     "trend_1h":      trend_1h,
                     "slope_d":       slope_d,

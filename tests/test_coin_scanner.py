@@ -236,6 +236,7 @@ def main():
                test_ledger_skips_when_unsafe,
                test_stale_trend_blocked,
                test_fresh_trend_still_passes,
+               test_max_loss_capped_by_capital_ratio,
                test_capital_sync,
                test_capital_sync_off_by_default,
                test_capital_sync_survives_bad_api]:
@@ -332,6 +333,42 @@ def test_fresh_trend_still_passes():
     assert c["trend"] == "DOWN"
     print("    ✅ 통과")
 
+
+
+# ── 확신도 시드가 커져도 손실 한도는 자본에 묶여 있는가 ─────
+
+def test_max_loss_capped_by_capital_ratio():
+    """★ 확신도로 시드를 키우면 시드×4 손절선도 함께 커진다.
+    자본 대비 상한이 없으면 자본 $500 에서 1회 손실이 절반까지 간다."""
+    print("\n[7b] ★ 손실 한도는 자본 비율로 한 번 더 묶인다")
+    prev_live = config.LIVE_TRADING
+    config.LIVE_TRADING = False
+    try:
+        pt = new_trader("maxloss", BalanceAPI(equity=500.0))
+        pt.total_capital, pt.total_pnl = 500.0, 0.0
+
+        ratio   = config.MAX_NET_LOSS_CAPITAL_RATIO
+        seed    = 45.0                      # 확신도 1.35 로 부풀린 시드
+        by_seed = seed * config.MAX_NET_LOSS_SEED_MULT      # $180
+        by_cap  = 500.0 * ratio                             # $110
+
+        pt.open_position("XUSDT", "UP", 100.0, invest_override=seed)
+        got = -pt._get_max_loss_usd()
+        print(f"    시드 ${seed:.0f} → 시드×4 = ${by_seed:.0f}")
+        print(f"    자본 $500 × {ratio:.0%} = ${by_cap:.0f}")
+        print(f"    실제 적용 손절 한도 = ${got:.2f}")
+        assert abs(got - by_cap) < 0.01, f"자본 비율 상한이 안 걸렸다: {got}"
+        assert got < by_seed, "시드 기준보다 작아야 한다"
+        print(f"    ✅ 자본의 {got/500:.0%} 로 묶임")
+
+        # 손실이 커져도 손절선이 따라 당겨지면 안 된다 (자기 조기 손절 방지)
+        pt.total_pnl = -200.0
+        still = -pt._get_max_loss_usd()
+        print(f"    자본이 $300 으로 줄어든 뒤에도 한도 ${still:.2f} (진입 시점 기준 유지)")
+        assert abs(still - by_cap) < 0.01, "보유 중 손절선이 당겨졌다"
+        print("    ✅")
+    finally:
+        config.LIVE_TRADING = prev_live
 
 
 # ── 기동 시 자본 동기화 (봇 전용 서브계좌용) ──────────────────

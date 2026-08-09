@@ -14,6 +14,7 @@ from bingx_api import BingXAPI
 from coin_scanner import CoinScanner
 from paper_trader import PaperTrader
 from risk_governor import RiskGovernor
+import recency
 import config
 from config import (
     SCAN_INTERVAL_MIN, RESCAN_AFTER_EXIT_MIN,
@@ -629,10 +630,37 @@ class StrategyEngine:
                 logger.warning(f"[포지션확인실패] 거래소 포지션 조회 오류: {e}")
 
         price  = self.api.get_price(symbol)
+
+        # ── 확신도 기반 시드 ────────────────────────────────
+        # 자리가 좋으면 처음부터 크게, 애매하면 작게.
+        # 시드가 커지면 하드캡(=보유 자본)에 더 빨리 닿아 물타기 사다리가
+        # 얕아진다 — 손실이 커진 건 언제나 고단계 물타기였으므로 이 방향이 맞다.
+        invest = None
+        conv_mult, conv_why = 1.0, []
+        if config.CONVICTION_SIZING_ENABLED:
+            base_seed = self.pt._get_initial_position_usd()
+            conv_mult, conv_why = recency.conviction(
+                coin, config.CONVICTION_MIN_MULT, config.CONVICTION_MAX_MULT)
+            # 거버너가 시드를 줄이고 있는 중이라면 확신도로 되돌리지 않는다.
+            # 낙폭·연속손실 국면에서 "좋아 보이는 자리"는 특히 못 믿는다.
+            gov_mult = self.governor.seed_multiplier(equity) if self.governor else 1.0
+            if gov_mult < 1.0 and conv_mult > 1.0:
+                conv_why.append(f"거버너 축소 중({gov_mult:.2f}) → 가산 취소")
+                conv_mult = 1.0
+            invest = max(config.DYNAMIC_SEED_MIN_USD, base_seed * conv_mult)
+            logger.info(
+                f"[확신도] {symbol} 배율 {conv_mult:.2f} → 시드 "
+                f"${base_seed:.0f} → ${invest:.0f}"
+                + (f" | {', '.join(conv_why)}" if conv_why else "")
+            )
+
         # 코인 선정 지표를 함께 넘긴다 — 나중에 결과와 대조해
         # "어떤 조건의 코인이 실제로 이겼나" 를 숫자로 볼 수 있다.
+        ctx = _entry_ctx(coin)
+        ctx["conv_mult"] = conv_mult
         result = self.pt.open_position(symbol, trend, price,
-                                       entry_ctx=_entry_ctx(coin))
+                                       invest_override=invest,
+                                       entry_ctx=ctx)
         if result is None:
             logger.error(f"[진입실패] {symbol} — 실거래 주문 거부, 다음 틱에 재스캔")
             return

@@ -199,6 +199,51 @@ def test_momentum_ratio_flat_denominator():
     print("    ✅ 판단 보류(1.0)")
 
 
+# ── 4. 확신도 시드 ───────────────────────────────────────────
+
+GOOD = {"dir_agree": True, "adx": 34, "fresh_ext": 0.3,
+        "fresh_mom": 1.8, "consistency": 0.8}
+BAD  = {"dir_agree": False, "adx": 18, "fresh_ext": 2.2,
+        "fresh_mom": 0.3, "consistency": 0.5}
+
+
+def test_conviction_scales_with_setup_quality():
+    print("\n[14] ★ 좋은 자리는 크게, 애매한 자리는 작게")
+    g, gw = recency.conviction(GOOD)
+    b, bw = recency.conviction(BAD)
+    print(f"    좋은 자리 ×{g}  ({', '.join(gw)})")
+    print(f"    애매한 자리 ×{b}  ({', '.join(bw)})")
+    assert g > 1.1, f"확신 있는 자리인데 가산이 없다: {g}"
+    assert b < 0.9, f"애매한 자리인데 축소가 없다: {b}"
+    assert g > b
+    print("    ✅")
+
+
+def test_conviction_stays_in_bounds():
+    print("\n[15] 확신도 배율은 범위를 벗어나지 않는다")
+    extreme_good = dict(GOOD, adx=99, fresh_ext=-5, fresh_mom=99, consistency=1.0)
+    extreme_bad  = dict(BAD,  adx=0,  fresh_ext=99, fresh_mom=-99, consistency=0.0)
+    hi, _ = recency.conviction(extreme_good, 0.6, 1.35)
+    lo, _ = recency.conviction(extreme_bad,  0.6, 1.35)
+    print(f"    최대 ×{hi} / 최소 ×{lo}")
+    assert hi == 1.35 and lo == 0.6
+    print("    ✅")
+
+
+def test_conviction_handles_missing_fields():
+    """스캐너가 필드를 못 채운 경우에도 터지지 않고 중립(1.0)에 가까워야"""
+    print("\n[16] 지표가 비어 있어도 안전")
+    m, why = recency.conviction({})
+    print(f"    빈 dict → ×{m} ({why})")
+    assert m == 1.0, "지표가 없는데 배율을 조정하면 안 된다 (없는 근거로 베팅)"
+    m2, _ = recency.conviction({"adx": None, "fresh_mom": None,
+                                "consistency": None, "fresh_ext": None})
+    assert m2 == 1.0, m2
+    m3, _ = recency.conviction({"adx": "이상한값"})
+    assert m3 == 1.0, m3
+    print("    ✅ 전부 중립(1.0)")
+
+
 def test_short_data_is_safe():
     print("\n[13] 데이터가 모자라도 터지지 않는다")
     assert recency.slope([], 6) == 0.0
@@ -228,6 +273,9 @@ def main():
              test_old_trend_pulled_back_is_allowed,
              test_fresh_trend_gets_bonus,
              test_momentum_ratio_flat_denominator,
+             test_conviction_scales_with_setup_quality,
+             test_conviction_stays_in_bounds,
+             test_conviction_handles_missing_fields,
              test_short_data_is_safe]
     assert len(order) == len(fns), "테스트 목록 누락"
     for fn in order:
