@@ -47,6 +47,7 @@ class RiskGovernor:
         self.consec_losses:    int   = 0
         self.halt_until:       float = 0.0   # 이 시각까지 신규 진입 금지
         self.halt_reason:      str   = ""
+        self.recovery_mode:    bool  = False # 중지 해제 후 최소 규모 재개 중
         self._last_logged_mult: float = -1.0
         self._load()
 
@@ -66,6 +67,7 @@ class RiskGovernor:
             self.consec_losses    = int(d.get("consec_losses", 0))
             self.halt_until       = float(d.get("halt_until", 0.0))
             self.halt_reason      = str(d.get("halt_reason", ""))
+            self.recovery_mode    = bool(d.get("recovery_mode", False))
             logger.info(
                 f"[거버너] 복원 | 고점 ${self.peak_equity:,.2f} | "
                 f"연속손실 {self.consec_losses}회"
@@ -87,6 +89,7 @@ class RiskGovernor:
                     "consec_losses":    self.consec_losses,
                     "halt_until":       round(self.halt_until, 1),
                     "halt_reason":      self.halt_reason,
+                    "recovery_mode":    self.recovery_mode,
                 }, f, ensure_ascii=False, indent=2)
             os.replace(tmp, STATE_FILE)
         except Exception as e:
@@ -121,14 +124,26 @@ class RiskGovernor:
             self._save()
 
     def record_trade(self, pnl: float):
-        """청산 결과를 알려준다 — 연속 손실 카운터 갱신"""
+        """청산 결과를 알려준다 — 연속 손실 카운터 및 회복 모드 갱신"""
         if pnl > 0:
-            if self.consec_losses:
-                logger.info(f"[거버너] 익절 — 연속손실 {self.consec_losses} → 0 리셋")
+            if self.consec_losses or self.recovery_mode:
+                logger.info(
+                    f"[거버너] 익절 — 연속손실 {self.consec_losses} → 0"
+                    + (", 회복 모드 해제 (시드 100% 복귀)" if self.recovery_mode else "")
+                )
             self.consec_losses = 0
+            self.recovery_mode = False
+            self.halt_until    = 0.0
+            self.halt_reason   = ""
         else:
             self.consec_losses += 1
             logger.info(f"[거버너] 손절 — 연속손실 {self.consec_losses}회")
+            # 회복 모드(최소 규모 재개) 중에 또 졌다면 다시 중지한다.
+            # 그대로 두면 최소 규모로 무한정 흘리게 된다.
+            if self.recovery_mode:
+                self.halt_until = 0.0   # _halt 의 "더 긴 중지 유지" 가드 우회
+                self._halt(self.cfg.GOVERNOR_HALT_MIN,
+                           f"회복 모드 재진입 실패 (연속손실 {self.consec_losses}회)")
         self._save()
 
     # ── 브레이크 계산 ─────────────────────────────────────────
@@ -170,26 +185,41 @@ class RiskGovernor:
     # ── 외부 인터페이스 ───────────────────────────────────────
 
     def seed_multiplier(self, equity: float) -> float:
-        """지금 걸어도 되는 시드 배율 (0.0 = 진입 금지)"""
+        """지금 걸어도 되는 시드 배율 (0.0 = 진입 금지)
+
+        ※ 데드락 방지가 이 함수의 핵심이다.
+          "4연패 → 정지" 를 그대로 두면 진입이 막혀 이길 기회가 없고,
+          이기지 못하니 연패 카운터가 영영 안 풀린다. 낙폭 정지도 같다 —
+          자본은 거래로만 회복되는데 거래가 막혀 있으면 낙폭이 영구히 남는다.
+          그래서 중지가 끝나면 조건이 아직 살아 있어도 **최소 규모로 재개**한다.
+          완전 복귀는 익절 1회로만 이루어진다.
+        """
         if not self.cfg.GOVERNOR_ENABLED:
             return 1.0
 
-        if self.halt_until > time.time():
+        now = time.time()
+        if self.halt_until > now:
             return 0.0
 
-        dd_mult,  dd_why  = self._drawdown_mult(equity)
-        cl_mult,  cl_why  = self._consec_loss_mult()
+        dd_mult, dd_why = self._drawdown_mult(equity)
+        cl_mult, cl_why = self._consec_loss_mult()
         mult, why = (dd_mult, dd_why) if dd_mult <= cl_mult else (cl_mult, cl_why)
 
-        # 수익 반납 감지 → 당일 매매 중지
+        # 수익 반납 감지 → 당일 매매 중지 (익일 자동 해제)
         giveback, gb_why = self._giveback_check(equity)
-        if giveback:
+        if giveback and not self.recovery_mode:
             self._halt(self.cfg.GOVERNOR_GIVEBACK_HALT_MIN, gb_why)
             return 0.0
 
-        if mult == 0.0 and why:
-            self._halt(self.cfg.GOVERNOR_HALT_MIN, why)
-            return 0.0
+        if mult == 0.0:
+            if self.recovery_mode:
+                # 중지를 이미 겪었다 → 재중지하지 않고 최소 규모로 재개.
+                # 여기서 다시 지면 record_trade() 가 또 중지를 건다.
+                mult = self.cfg.GOVERNOR_RECOVERY_MULT
+                why  = f"{why or self.halt_reason} — 회복 모드(익절 1회 시 복귀)"
+            else:
+                self._halt(self.cfg.GOVERNOR_HALT_MIN, why or "리스크 한도 도달")
+                return 0.0
 
         if mult != self._last_logged_mult:
             if mult < 1.0:
@@ -203,11 +233,13 @@ class RiskGovernor:
         until = time.time() + minutes * 60
         if until <= self.halt_until:
             return   # 이미 더 긴 중지가 걸려 있음
-        self.halt_until  = until
-        self.halt_reason = reason
+        self.halt_until    = until
+        self.halt_reason   = reason
+        self.recovery_mode = True   # 중지 해제 후엔 최소 규모로 재개
         logger.warning(
             f"[거버너] 신규 진입 {minutes:.0f}분 중지 — {reason} "
-            f"(보유 포지션은 전략이 계속 관리한다)"
+            f"(해제 후 시드 {self.cfg.GOVERNOR_RECOVERY_MULT:.0%} 로 재개, "
+            f"익절 1회 시 완전 복귀 / 보유 포지션은 전략이 계속 관리한다)"
         )
         self._save()
 
