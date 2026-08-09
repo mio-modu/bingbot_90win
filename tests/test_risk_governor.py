@@ -208,6 +208,53 @@ def test_persistence():
     print("    ✅ 유지됨")
 
 
+def test_account_switch_is_not_a_drawdown():
+    """★ 실제로 터진 사고 — 계좌를 옮겼더니 거버너가 영구 정지시켰다
+
+    메인계좌($1,050)에서 서브계좌($500)로 옮기자 거버너는 디스크에 저장된
+    고점 $1,050 을 그대로 복원해 "52.4% 폭락"으로 읽고 매매를 중지했다.
+    $500 이 $1,050 으로 돌아갈 일이 없으니 영구 정지였다.
+    """
+    print("\n[6b] ★ 계좌 변경을 폭락으로 오인하지 않는가")
+    g = fresh("acct")
+    g.update_equity(1050.0)          # 메인계좌에서 돌던 시절
+    assert g.peak_equity == 1050.0
+
+    # 서브계좌 $500 으로 갈아탐 — 아직 기준선을 안 옮긴 상태
+    mult, why = g._drawdown_mult(500.0)
+    ok_before, why_before = g.can_enter(500.0)
+    print(f"    재설정 전: 시드배율 {mult:.0%} / 진입 {ok_before} ({why_before})")
+    assert mult == 0.0, "이 시나리오에서는 원래 진입이 막혀야 한다(재현 확인)"
+
+    # 자본동기화가 기준선을 옮긴다
+    g.reset_baseline(500.0, why="자본동기화 $1,050 → $500")
+    print(f"    재설정 후: 고점 ${g.peak_equity:,.0f} / "
+          f"당일시작 ${g.day_start_equity:,.0f}")
+    assert g.peak_equity == 500.0
+    assert g.day_start_equity == 500.0 and g.day_peak_equity == 500.0
+    assert g.halt_until == 0.0, "잘못된 낙폭으로 걸린 중지가 안 풀렸다"
+
+    ok, why2 = g.can_enter(500.0)
+    print(f"    진입 가능 {ok} / 시드배율 {g.seed_multiplier(500.0):.0%}")
+    assert ok is True, f"기준선을 옮겼는데도 막힌다: {why2}"
+    assert g.seed_multiplier(500.0) == 1.0
+    print("    ✅ 입출금·계좌변경은 손실로 치지 않는다")
+
+
+def test_reset_baseline_keeps_trade_history():
+    """계좌를 옮겼다고 최근 매매 성적이 좋아지는 건 아니다"""
+    print("\n[6c] 기준선 재설정이 연속손실 기록까지 지우지는 않는다")
+    g = fresh("acct2")
+    g.update_equity(1000.0)
+    for _ in range(3):
+        g.record_trade(-10.0)
+    before = g.consec_losses
+    g.reset_baseline(500.0)
+    print(f"    연속손실 {before} → {g.consec_losses}")
+    assert g.consec_losses == before, "매매 기록까지 지우면 브레이크가 헐거워진다"
+    print("    ✅ 유지됨")
+
+
 def test_disabled():
     """끄면 완전히 무개입이어야 한다"""
     print("\n[7] GOVERNOR_ENABLED = False")
@@ -229,7 +276,10 @@ def main():
     print("=" * 62)
     for fn in [test_drawdown_ladder, test_consec_loss_ladder, test_giveback,
                test_open_position_untouched, test_no_deadlock,
-               test_persistence, test_disabled]:
+               test_persistence,
+               test_account_switch_is_not_a_drawdown,
+               test_reset_baseline_keeps_trade_history,
+               test_disabled]:
         fn()
     print("\n" + "=" * 62)
     print("  ✅ 전부 통과")

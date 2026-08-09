@@ -588,6 +588,22 @@ class PaperTrader:
             f"누적손익 ${self.total_pnl:+,.2f} 유지 | "
             f"확정자본 ${self.total_capital + self.total_pnl:,.2f}"
         )
+
+        # ★ 거버너 기준선도 함께 옮긴다.
+        #   이걸 빼먹으면 거버너가 "계좌 변경"을 "폭락"으로 읽는다.
+        #   실제 사고: 메인계좌($1,050)에서 서브계좌($500)로 옮겼더니
+        #   거버너가 저장해둔 고점 $1,050 을 기준으로 52.4% 낙폭이라 판단해
+        #   매매를 중지시켰다. $500 이 $1,050 으로 돌아갈 리 없으니 영구 정지였다.
+        #   여기서 자본이 바뀌는 경우는 입금·출금·계좌변경뿐이고,
+        #   그 어느 것도 매매 손실이 아니다.
+        if self.governor is not None:
+            try:
+                self.governor.reset_baseline(
+                    self.total_capital + self.total_pnl,
+                    why=f"자본동기화 ${old:,.0f} → ${self.total_capital:,.0f}")
+            except Exception as e:
+                logger.warning(f"[거버너] 기준선 재설정 실패(무시): {e}")
+
         self.save_state()
         return True
 

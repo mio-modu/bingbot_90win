@@ -123,6 +123,46 @@ class RiskGovernor:
             self.day_peak_equity = new_day_peak
             self._save()
 
+    def reset_baseline(self, equity: float, why: str = ""):
+        """기준선을 지금 자본으로 다시 잡는다.
+
+        ⚠ **매매 손익이 아닌 이유로 자본이 바뀌었을 때만** 부른다.
+          입금·출금·계좌 변경이 그렇다.
+
+        왜 필요한가 (실제로 터진 사고)
+        ------------------------------
+        메인계좌($1,050)에서 돌던 봇을 서브계좌($500)로 옮겼다.
+        거버너는 디스크에 저장된 고점 $1,050 을 그대로 복원했고,
+        새 계좌의 $500 을 "고점 대비 52.4% 폭락"으로 읽어 매매를 중지했다.
+        잃은 게 아니라 계좌가 바뀐 것인데도.
+        게다가 $500 이 $1,050 으로 돌아갈 일이 없으니 **영구 정지**였다.
+
+        낙폭 기준선이 실제 자본과 무관해지면 거버너는 안전장치가 아니라
+        고장난 브레이크가 된다.
+
+        연속손실 카운터는 건드리지 않는다 — 그건 매매 결과이고,
+        계좌를 옮겼다고 최근 매매가 좋아진 건 아니다.
+        """
+        if equity <= 0:
+            return
+        old_peak = self.peak_equity
+        self.peak_equity      = equity
+        self.day_start_equity = equity
+        self.day_peak_equity  = equity
+        self.day_key          = datetime.now(KST).strftime("%Y-%m-%d")
+        # 잘못된 낙폭으로 걸린 중지는 함께 푼다.
+        if self.halt_until > time.time():
+            logger.info(f"[거버너] 기준선 재설정 → 기존 매매중지 해제 "
+                        f"({self.halt_reason})")
+        self.halt_until  = 0.0
+        self.halt_reason = ""
+        logger.warning(
+            f"[거버너] 기준선 재설정: 고점 ${old_peak:,.2f} → ${equity:,.2f}"
+            + (f" | {why}" if why else "")
+            + " (입출금·계좌변경은 손실이 아니다)"
+        )
+        self._save()
+
     def record_trade(self, pnl: float):
         """청산 결과를 알려준다 — 연속 손실 카운터 및 회복 모드 갱신"""
         if pnl > 0:

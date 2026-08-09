@@ -184,6 +184,34 @@ def main() -> int:
             print("     아래를 실행하면 거래소 잔고를 자동으로 따라갑니다:")
             print('       echo "CAPITAL_AUTO_SYNC=true" >> .env')
 
+    # ── 6. 리스크 거버너 기준선 ─────────────────────────
+    # 계좌를 옮기면 거버너가 옛 계좌의 고점을 그대로 들고 있어서
+    # "폭락"으로 오인하고 매매를 영구 정지시킨다. 여기서 미리 잡는다.
+    gov_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "governor_state.json")
+    if os.path.exists(gov_path) and equity > 0:
+        try:
+            import json
+            with open(gov_path, encoding="utf-8") as f:
+                gov = json.load(f)
+            peak = float(gov.get("peak_equity", 0) or 0)
+            halt = float(gov.get("halt_until", 0) or 0)
+            import time as _t
+            print("\n[6/6] 리스크 거버너")
+            print(f"{OK}저장된 고점 ${peak:,.2f} / 현재 ${equity:,.2f}")
+            if peak > 0 and (peak - equity) / peak > 0.25:
+                print(f"{WARN}거버너가 {((peak-equity)/peak):.0%} 낙폭으로 인식합니다.")
+                print("     계좌를 옮겼다면 이건 손실이 아니라 계좌 변경입니다.")
+                print("     그대로 두면 거버너가 매매를 계속 막습니다.")
+                print("     기준선 초기화:")
+                print("       pkill -f watchdog.py; rm governor_state.json")
+                print("       nohup ./run.sh > run.log 2>&1 &")
+            elif halt > _t.time():
+                print(f"{WARN}매매 중지 {(halt - _t.time())/60:.0f}분 남음 "
+                      f"({gov.get('halt_reason', '')})")
+        except Exception as e:
+            print(f"{WARN}거버너 상태 확인 실패(무시): {e}")
+
     print("\n" + "=" * 46)
     print("  점검 완료 — 주문은 하나도 내지 않았습니다")
     print("=" * 46)
