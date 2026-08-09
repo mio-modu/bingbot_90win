@@ -38,6 +38,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
 # ── 단일 인스턴스 보장 (중복 실행 방지) ──────────────────────
+# 봇이 둘 이상 동시에 돌면 같은 계좌에 주문을 내고 서로의 포지션을
+# "미청산 포지션" 으로 오인한다. 물타기가 두 배로 들어가고 백스톱 STOP 끼리
+# 충돌한다. 반드시 하나만 살아 있어야 한다.
 if sys.platform == "win32":
     import ctypes
     _MUTEX_NAME = "Global\\BingX_Phoenix_Live_v1"   # 실거래 봇 전용 (certain 봇과 분리)
@@ -45,6 +48,26 @@ if sys.platform == "win32":
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         print("[WATCHDOG] 이미 실행 중입니다 - 중복 실행 방지 → 종료")
         sys.exit(0)
+else:
+    # POSIX(리눅스·macOS): 뮤텍스가 없으므로 파일 잠금으로 대신한다.
+    # 이게 없으면 systemd 재시작 중 이전 프로세스가 남아 있거나, 사람이
+    # 손으로 python main.py 를 한 번 더 띄우면 봇이 둘이 된다.
+    # flock 은 프로세스가 죽으면 커널이 자동으로 풀어주므로
+    # 강제 종료·전원 차단 후에도 잠금이 남지 않는다 (PID 파일과 다른 점).
+    import fcntl
+    _LOCK_PATH = os.path.join(BASE_DIR, ".bot.lock")
+    try:
+        _lock_fp = open(_LOCK_PATH, "w")          # 전역 참조 유지 = 프로세스 수명 동안 잠금 유지
+        fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_fp.write(f"{os.getpid()}\n")
+        _lock_fp.flush()
+    except BlockingIOError:
+        print(f"[WATCHDOG] 이미 실행 중입니다 ({_LOCK_PATH}) — 중복 실행 방지 → 종료")
+        sys.exit(0)
+    except OSError as e:
+        # 잠금 자체가 불가능한 파일시스템(일부 NFS 등)이면 경고만 하고 진행.
+        # 잠금을 못 건다고 봇을 못 돌게 하는 건 과하다.
+        print(f"[WATCHDOG] 중복 실행 방지 잠금 실패(무시하고 진행): {e}")
 
 logging.basicConfig(
     level=logging.INFO,
