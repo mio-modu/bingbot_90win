@@ -69,6 +69,36 @@ python tests/test_risk_governor.py # 개별
 > 그대로 두면 진입이 막혀 이길 기회가 없고, 이기지 못하니 카운터가 영영 안
 > 풀려 봇이 영구 정지된다. 낙폭 정지도 같다.
 
+## 클라우드 서버로 옮기기 (노트북 없이 24시간)
+
+노트북에서 돌리면 PC 를 끄거나 자리를 비우는 순간 봇이 멈추거나 방치된다.
+`setup_server.sh` 로 Ubuntu 서버에 올리면 24시간 돌고, **폰의 SSH 앱만으로
+상태 확인·중지·재시작·긴급청산이 가능하다.**
+
+```bash
+git clone https://github.com/mio-modu/bingbot_90win /opt/bingx-bot
+cd /opt/bingx-bot && bash setup_server.sh
+```
+
+설치 스크립트가 하는 일: 패키지(python3·git) 설치 → 가상환경 → API 키 입력
+(입력 시 화면에 안 보이고 `.env` 는 권한 600) → **안전장치 테스트 실행,
+실패하면 설치 중단** → systemd 서비스 등록·기동.
+
+폰에서 쓰는 명령 (Termius / JuiceSSH):
+
+| 목적 | 명령 |
+|---|---|
+| 상태 | `sudo systemctl status bingx-bot` |
+| 중지 / 시작 | `sudo systemctl stop\|start bingx-bot` |
+| 실시간 로그 | `tail -f /opt/bingx-bot/bot.log` |
+| 최근 청산 | `grep 청산 /opt/bingx-bot/bot.log \| tail -20` |
+| 분석 | `cd /opt/bingx-bot && ./venv/bin/python analyze.py` |
+| 긴급청산 | `cd /opt/bingx-bot && ./venv/bin/python close_all.py` |
+| 봇 갱신 | `cd /opt/bingx-bot && git pull && sudo systemctl restart bingx-bot` |
+
+> 서버로 옮긴 뒤에는 **노트북의 봇을 반드시 끄세요.** 같은 계좌에 두 봇이
+> 주문을 내면 서로의 포지션을 미청산 포지션으로 오인합니다.
+
 ## 한 번에 실행 (`oneclick.py`)
 
 봇 폴더가 여러 개일 때 해야 할 일을 한 명령으로 묶었다.
