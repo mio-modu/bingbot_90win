@@ -50,6 +50,7 @@ class StrategyEngine:
         self.state   = BotState.IN_POSITION if self.pt.position else BotState.IDLE
         self._last_scan_time  = 0.0
         self._last_exit_time  = 0.0
+        self._last_reconcile_time = 0.0   # 거래소 정합성 점검 주기 타이머
         self._current_coin_enter_time = (
             self.pt.position.open_time if self.pt.position else 0.0
         )
@@ -658,6 +659,20 @@ class StrategyEngine:
 
         # 거버너에 확정 자본 보고 (고점·당일 기준선 갱신)
         self.governor.update_equity(self.pt.total_capital + self.pt.total_pnl)
+
+        # ── 거래소 정합성 점검 (60초 주기) ──
+        # 백스톱 STOP 이 체결되면 거래소 포지션만 사라지고 봇은 모른다.
+        # 유령 포지션을 붙잡고 있으면 신규 진입도 못 하므로 주기적으로 확인한다.
+        if (self.pt.position and config.LIVE_TRADING
+                and now - self._last_reconcile_time >= 60):
+            self._last_reconcile_time = now
+            try:
+                if self.pt.reconcile_with_exchange():
+                    self.state = BotState.IDLE
+                    self._last_exit_time = now
+                    return
+            except Exception as e:
+                logger.warning(f"[정합성] 점검 중 오류(무시): {e}")
 
         # ── 매 틱: BTC 가격 히스토리 업데이트 (시장충격 감지용) ──
         btc_shock_this_tick = self._update_btc_and_check_shock()

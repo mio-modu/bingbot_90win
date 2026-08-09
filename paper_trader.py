@@ -479,6 +479,49 @@ class PaperTrader:
         except Exception as e:
             logger.warning(f"[백스톱 실패] {p.symbol}: {e} — 거래소 손절 없이 진행")
 
+    def reconcile_with_exchange(self) -> bool:
+        """봇은 포지션이 있다고 믿는데 거래소에는 없는 경우를 감지·정리한다.
+
+        백스톱 STOP_MARKET 이 체결되면 거래소 포지션은 사라지지만 봇은 모른다.
+        그 상태로 두면 봇이 유령 포지션을 계속 관리하며 신규 진입도 하지 않는다.
+        감지되면 장부를 닫는다 — 체결가는 알 수 없으므로 걸어둔 STOP 가격을
+        추정치로 쓴다 (없으면 현재가).
+
+        반환: 불일치를 처리했으면 True
+        """
+        p = self.position
+        if not p or not self.live_api or not config.LIVE_TRADING:
+            return False
+        pos_side = "LONG" if p.trend == "UP" else "SHORT"
+        try:
+            positions = self.live_api.get_positions(p.symbol)
+        except Exception as e:
+            logger.debug(f"[정합성] 포지션 조회 실패(건너뜀): {e}")
+            return False   # 조회 실패를 "포지션 없음"으로 오판하면 안 된다
+
+        still_open = any(
+            x.get("positionSide") == pos_side and float(x.get("positionAmt", 0)) != 0
+            for x in positions
+        )
+        if still_open:
+            return False
+
+        # 체결가 추정: 백스톱이 걸려 있었다면 그 가격에서 나갔을 가능성이 높다
+        est_price = p.stop_price if p.stop_price > 0 else 0.0
+        if est_price <= 0:
+            try:
+                est_price = self.live_api.get_price(p.symbol)
+            except Exception:
+                est_price = p.avg_price
+        logger.critical(
+            f"[정합성⚠] {p.symbol} {pos_side} — 봇은 보유 중이나 거래소에 포지션 없음. "
+            f"거래소 강제 손절(백스톱) 체결로 추정 → 장부를 닫는다. "
+            f"추정 체결가 {est_price:.8f} "
+            f"(실제 체결가와 다를 수 있으니 거래소 내역과 대조할 것)"
+        )
+        self.close_position(est_price, "거래소청산감지(백스톱추정)")
+        return True
+
     def clear_exchange_stop(self, symbol: str, order_id: str = None):
         """청산 후 남은 STOP 주문 정리 (고아 주문이 다음 포지션을 오폭하지 않도록)"""
         if not self.live_api or not config.LIVE_TRADING:
