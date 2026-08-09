@@ -31,13 +31,32 @@ echo "  위치: $BOT_DIR"
 echo "======================================"
 
 # ── 0. 올바른 코드인지 확인 ─────────────────────────────────
+# 기본 브랜치(master)는 옛 페이퍼 봇이다. 브랜치를 지정하지 않고 clone 하면
+# 실거래 코드가 아닌 것이 받아진다.
+#
+# 값(True/False)이 아니라 "실거래 코드에만 있는 파일"로 판별한다.
+# config.py 의 LIVE_TRADING 은 이제 .env 로 덮어쓸 수 있어서
+# `LIVE_TRADING = True` 라는 글자를 찾는 방식은 정상 코드도 걸러버렸다.
 echo "[0/5] 코드 확인..."
-if ! grep -qE '^LIVE_TRADING\s*=\s*True' config.py 2>/dev/null || [ ! -d tests ]; then
+_missing=""
+for _f in config.py main.py watchdog.py risk_governor.py trade_journal.py tests/run_all.py; do
+    [ -f "$_f" ] || _missing="$_missing $_f"
+done
+if [ -n "$_missing" ] || ! grep -qE '^LIVE_TRADING[[:space:]]*=' config.py 2>/dev/null; then
     echo "  ✗ 실거래 코드가 아닙니다 (기본 브랜치 master 는 옛 페이퍼 봇)."
-    echo "    git clone -b claude/github-push-time-check-ioamx1 ..."
+    [ -n "$_missing" ] && echo "    없는 파일:$_missing"
+    echo ""
+    echo "    올바른 받기:"
+    echo "      rm -rf ~/bingx-bot"
+    echo "      git clone -b claude/github-push-time-check-ioamx1 \\"
+    echo "          https://github.com/mio-modu/bingbot_90win ~/bingx-bot"
     exit 1
 fi
-echo "  ✅ 실거래 코드 확인"
+echo "  ✅ 실거래 코드 확인 (안전장치·저널·리스크 관리 포함)"
+# .env 로 실거래를 꺼둔 상태면 알려준다 (설치는 계속)
+if [ -f "$BOT_DIR/.env" ] && grep -qiE '^LIVE_TRADING[[:space:]]*=[[:space:]]*(false|0|no)' "$BOT_DIR/.env"; then
+    echo "  ⚠ .env 에서 LIVE_TRADING 이 꺼져 있습니다 — 모의 거래로 돕니다"
+fi
 
 # ── 1. 패키지 ───────────────────────────────────────────────
 echo "[1/5] 패키지 설치..."

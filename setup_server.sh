@@ -47,22 +47,28 @@ if [ ! -f config.py ] || [ ! -f main.py ]; then
 fi
 CUR_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '(git 아님)')"
 echo "  브랜치: $CUR_BRANCH"
-if ! grep -qE '^LIVE_TRADING\s*=\s*True' config.py; then
+# 값(True/False)이 아니라 "실거래 코드에만 있는 파일"로 판별한다.
+# config.py 의 LIVE_TRADING 은 .env 로 덮어쓸 수 있게 바뀌어서
+# `LIVE_TRADING = True` 라는 글자를 찾는 방식은 정상 코드도 걸러버렸다.
+_missing=""
+for _f in watchdog.py risk_governor.py trade_journal.py tests/run_all.py; do
+    [ -f "$_f" ] || _missing="$_missing $_f"
+done
+if [ -n "$_missing" ] || ! grep -qE '^LIVE_TRADING[[:space:]]*=' config.py; then
     echo ""
-    echo "  ✗ config.py 에 LIVE_TRADING = True 가 없습니다."
-    echo "    실거래 코드가 아닌 브랜치를 받은 것 같습니다."
+    echo "  ✗ 실거래 코드가 아닌 브랜치를 받은 것 같습니다."
     echo "    (이 저장소의 기본 브랜치 master 는 옛 페이퍼 봇입니다)"
+    [ -n "$_missing" ] && echo "    없는 파일:$_missing"
     echo ""
     echo "    올바른 받기:"
     echo "      git clone -b claude/github-push-time-check-ioamx1 \\"
     echo "          https://github.com/mio-modu/bingbot_90win $BOT_DIR"
     exit 1
 fi
-if [ ! -d tests ]; then
-    echo "  ✗ tests/ 폴더가 없습니다 — 안전장치가 없는 옛 코드입니다."
-    exit 1
+echo "  ✅ 실거래 코드 확인 (안전장치·저널·리스크 관리 포함)"
+if [ -f "$BOT_DIR/.env" ] && grep -qiE '^LIVE_TRADING[[:space:]]*=[[:space:]]*(false|0|no)' "$BOT_DIR/.env"; then
+    echo "  ⚠ .env 에서 LIVE_TRADING 이 꺼져 있습니다 — 모의 거래로 돕니다"
 fi
-echo "  ✅ 실거래 코드 확인 (LIVE_TRADING=True, 테스트 포함)"
 
 # ── 1. 시스템 패키지 ────────────────────────────────────────
 echo "[1/6] 패키지 설치..."
