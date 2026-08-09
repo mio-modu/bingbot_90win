@@ -531,6 +531,66 @@ class PaperTrader:
         self.close_position(est_price, "거래소청산감지(백스톱추정)")
         return True
 
+    def sync_capital_with_exchange(self) -> bool:
+        """기동 시 거래소 실제 잔고와 봇 자본을 맞춘다 → 조정했으면 True
+
+        **봇 전용 서브계좌**를 쓸 때 진가를 발휘한다. 서브계좌 잔고가 곧 봇의
+        자본이므로 TOTAL_CAPITAL 을 손으로 고칠 이유가 없어진다.
+        (과거 이력: $100 → $215 → $315 → $509 → $518 → $234 를 매번 수동 수정)
+
+        조정 방식은 total_pnl 을 건드리지 않는다. 거래 기록의 손익 합계는
+        그대로 두고 total_capital 만 옮겨서
+            total_capital + total_pnl == 거래소 순자산
+        이 되게 한다. 승패 기록과 누적손익의 의미가 보존된다.
+
+        CAPITAL_AUTO_SYNC 가 False 면 경고만 남기고 아무것도 바꾸지 않는다.
+        """
+        if not self.live_api or not config.LIVE_TRADING:
+            return False
+        try:
+            exch = self.live_api.get_equity()
+        except Exception as e:
+            logger.warning(f"[자본동기화] 잔고 조회 실패 — 설정값 유지: {e}")
+            return False
+        if exch <= 0:
+            logger.warning("[자본동기화] 잔고가 0 으로 조회됨 — 설정값 유지")
+            return False
+
+        book = self.total_capital + self.total_pnl
+        diff = exch - book
+        ratio = abs(diff) / exch
+
+        # 계좌를 잘못 가리켰을 가능성 — 자동으로 넘어가면 안 되는 크기
+        if ratio >= config.CAPITAL_MISMATCH_ALERT_RATIO:
+            logger.critical(
+                f"[자본불일치⚠] 봇 ${book:,.2f} vs 거래소 ${exch:,.2f} "
+                f"(차이 {ratio:.0%}). API 키가 다른 계좌를 가리키고 있거나 "
+                f"입출금이 있었을 수 있습니다. 확인하세요."
+            )
+
+        if not config.CAPITAL_AUTO_SYNC:
+            if abs(diff) >= config.LEDGER_DRIFT_WARN_USD:
+                logger.warning(
+                    f"[자본동기화] 꺼져 있음 — 봇 ${book:,.2f} / "
+                    f"거래소 ${exch:,.2f} (차이 ${diff:+,.2f}). "
+                    f"봇 전용 서브계좌라면 CAPITAL_AUTO_SYNC=True 를 권장합니다."
+                )
+            return False
+
+        if abs(diff) < 0.01:
+            return False
+
+        old = self.total_capital
+        self.total_capital = exch - self.total_pnl
+        logger.info(
+            f"[자본동기화] 거래소 기준으로 맞춤 | "
+            f"기준자본 ${old:,.2f} → ${self.total_capital:,.2f} | "
+            f"누적손익 ${self.total_pnl:+,.2f} 유지 | "
+            f"확정자본 ${self.total_capital + self.total_pnl:,.2f}"
+        )
+        self.save_state()
+        return True
+
     def reconcile_balance(self) -> float | None:
         """봇 장부와 거래소 실제 잔고를 대조한다 → 차이(USD), 대조 불가면 None
 

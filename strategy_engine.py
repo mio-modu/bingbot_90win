@@ -67,6 +67,9 @@ class StrategyEngine:
         self.scanner  = CoinScanner(self.api)
         self.governor = RiskGovernor(config)
         self.pt       = PaperTrader(live_api=self.api, governor=self.governor)
+        # 기동 시 거래소 실제 잔고와 자본을 맞춘다 (봇 전용 서브계좌 권장).
+        # 거버너 고점은 그 뒤에 잡아야 잘못된 기준으로 브레이크가 걸리지 않는다.
+        self.pt.sync_capital_with_exchange()
         self.governor.update_equity(self.pt.total_capital + self.pt.total_pnl)
         self.state   = BotState.IN_POSITION if self.pt.position else BotState.IDLE
         self._last_scan_time  = 0.0

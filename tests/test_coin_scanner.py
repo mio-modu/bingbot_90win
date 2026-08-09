@@ -225,7 +225,10 @@ def main():
                test_ledger_detects_drift,
                test_ledger_skips_when_unsafe,
                test_stale_trend_blocked,
-               test_fresh_trend_still_passes]:
+               test_fresh_trend_still_passes,
+               test_capital_sync,
+               test_capital_sync_off_by_default,
+               test_capital_sync_survives_bad_api]:
         fn()
     print("\n" + "=" * 62)
     print("  ✅ 전부 통과")
@@ -307,6 +310,79 @@ def test_fresh_trend_still_passes():
     print(f"    선정 결과: {picked or '없음'}")
     assert "STALE-USDT" in picked, "전 구간 하락인데 차단됐다 — 너무 엄격"
     print("    ✅ 통과")
+
+
+
+# ── 기동 시 자본 동기화 (봇 전용 서브계좌용) ──────────────────
+
+def test_capital_sync():
+    """★ 서브계좌 잔고에 자본을 맞춘다 — total_pnl 은 보존"""
+    print("\n[8] ★ 기동 시 자본 동기화")
+    prev_live, prev_sync = config.LIVE_TRADING, config.CAPITAL_AUTO_SYNC
+    config.LIVE_TRADING = True
+    config.CAPITAL_AUTO_SYNC = True
+    try:
+        # 서브계좌 실제 잔고 $980, 봇은 자본 $1050 + 누적손익 -$23.37 = $1026.63
+        pt = new_trader("capsync", BalanceAPI(equity=980.0))
+        pt.total_pnl = -23.37
+        before_book = pt.total_capital + pt.total_pnl
+        print(f"    조정 전: 기준자본 ${pt.total_capital:,.2f} + "
+              f"누적손익 ${pt.total_pnl:+,.2f} = ${before_book:,.2f}")
+
+        changed = pt.sync_capital_with_exchange()
+        after_book = pt.total_capital + pt.total_pnl
+        print(f"    조정 후: 기준자본 ${pt.total_capital:,.2f} + "
+              f"누적손익 ${pt.total_pnl:+,.2f} = ${after_book:,.2f}")
+
+        assert changed, "동기화가 일어나지 않음"
+        assert abs(after_book - 980.0) < 0.01, "확정자본이 거래소와 안 맞음"
+        assert abs(pt.total_pnl + 23.37) < 1e-9, \
+            "누적손익이 바뀌었다 — 승패 기록의 의미가 깨진다"
+        print("    ✅ 확정자본은 거래소와 일치, 누적손익은 그대로")
+    finally:
+        config.LIVE_TRADING, config.CAPITAL_AUTO_SYNC = prev_live, prev_sync
+
+
+def test_capital_sync_off_by_default():
+    """꺼져 있으면 경고만 하고 아무것도 바꾸지 않는다"""
+    print("\n[9] CAPITAL_AUTO_SYNC = False (기본값)")
+    prev_live, prev_sync = config.LIVE_TRADING, config.CAPITAL_AUTO_SYNC
+    config.LIVE_TRADING = True
+    config.CAPITAL_AUTO_SYNC = False
+    try:
+        pt = new_trader("capsync_off", BalanceAPI(equity=980.0))
+        cap_before = pt.total_capital
+        changed = pt.sync_capital_with_exchange()
+        print(f"    변경 여부 {changed} / 기준자본 ${pt.total_capital:,.2f} 유지")
+        assert not changed and pt.total_capital == cap_before
+        print("    ✅ 본계좌처럼 입출금이 섞이는 계좌를 보호한다")
+    finally:
+        config.LIVE_TRADING, config.CAPITAL_AUTO_SYNC = prev_live, prev_sync
+
+
+def test_capital_sync_survives_bad_api():
+    """조회 실패·잔고 0 에서는 설정값을 지킨다"""
+    print("\n[10] 잔고 조회가 이상할 때")
+    prev_live, prev_sync = config.LIVE_TRADING, config.CAPITAL_AUTO_SYNC
+    config.LIVE_TRADING = True
+    config.CAPITAL_AUTO_SYNC = True
+    try:
+        class Dead(BalanceAPI):
+            def get_equity(self):
+                raise RuntimeError("API 다운")
+
+        pt = new_trader("capsync_dead", Dead(0))
+        cap = pt.total_capital
+        assert not pt.sync_capital_with_exchange() and pt.total_capital == cap
+        print(f"    조회 실패 → 기준자본 ${cap:,.2f} 유지")
+
+        pt2 = new_trader("capsync_zero", BalanceAPI(equity=0.0))
+        cap2 = pt2.total_capital
+        assert not pt2.sync_capital_with_exchange() and pt2.total_capital == cap2
+        print(f"    잔고 0 응답 → 기준자본 ${cap2:,.2f} 유지")
+        print("    ✅ 일시적 오류로 자본을 0 으로 만들지 않는다")
+    finally:
+        config.LIVE_TRADING, config.CAPITAL_AUTO_SYNC = prev_live, prev_sync
 
 if __name__ == "__main__":
     main()
