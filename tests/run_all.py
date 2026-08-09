@@ -17,6 +17,7 @@ SUITE = [
     ("거래 저널 · MAE/MFE",    "test_journal.py"),
     ("거래소 강제 손절 백스톱", "test_exchange_stop.py"),
     ("리스크 거버너",          "test_risk_governor.py"),
+    ("수익 보존 락",           "test_profit_lock.py"),
     ("엔진 기동 스모크",       "test_engine_smoke.py"),
 ]
 

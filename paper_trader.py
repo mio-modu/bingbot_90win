@@ -94,6 +94,8 @@ class Position:
     mae_coin_pct:    float  = 0.0
     mfe_at_s:        float  = 0.0    # 진입 후 몇 초 만에 MFE 도달했는지
     mae_at_s:        float  = 0.0
+    # 수익 보존 락(profit lock)용 — 청산비용까지 뺀 실현 기준 최고 순수익
+    peak_realized:   float  = 0.0
     # DCA 단계 이력: [{step, at_s, price, add_usd, total_invested, kind}]
     step_history:    list   = field(default_factory=list)
 
@@ -284,6 +286,9 @@ class Position:
         self.trail_active = False
         self.trail_sl     = 0.0
         self.peak_price   = fill_price  # DCA 체결가부터 peak 재추적
+        # 수익 보존 락도 리셋 — 포지션 크기가 달라졌으므로 이전 고점 순수익은
+        # 더 이상 이 포지션의 기준이 아니다. 남겨두면 DCA 직후 즉시 락이 걸린다.
+        self.peak_realized = 0.0
         if was_active:
             logger.info(
                 f"[트레일 리셋] DCA {self.avg_down_step}단계 후 "
@@ -658,6 +663,7 @@ class PaperTrader:
                 "mae_coin_pct": p.mae_coin_pct,
                 "mfe_at_s":     p.mfe_at_s,
                 "mae_at_s":     p.mae_at_s,
+                "peak_realized": p.peak_realized,
                 "step_history": p.step_history,
                 "stop_order_id": p.stop_order_id,
                 "stop_price":    p.stop_price,
@@ -729,6 +735,7 @@ class PaperTrader:
                         mae_coin_pct = float(pd.get("mae_coin_pct", 0.0)),
                         mfe_at_s     = float(pd.get("mfe_at_s", 0.0)),
                         mae_at_s     = float(pd.get("mae_at_s", 0.0)),
+                        peak_realized = float(pd.get("peak_realized", 0.0)),
                         step_history = list(pd.get("step_history", [])),
                         stop_order_id = str(pd.get("stop_order_id", "")),
                         stop_price    = float(pd.get("stop_price", 0.0)),
@@ -928,6 +935,7 @@ class PaperTrader:
             "mae_coin_pct":   round(p.mae_coin_pct, 6),
             "mfe_at_s":       round(p.mfe_at_s, 1),
             "mae_at_s":       round(p.mae_at_s, 1),
+            "peak_realized":  round(p.peak_realized, 4),
             "steps":          p.step_history,
             "capital_before": round(self.total_capital + self.total_pnl - pnl, 2),
             "capital_after":  round(self.total_capital + self.total_pnl, 2),
@@ -996,6 +1004,39 @@ class PaperTrader:
 
     # ── 익절 체크 ────────────────────────────────────────────
 
+    def is_profit_lock_hit(self, price: float) -> bool:
+        """수익 보존 락 — 고점 순수익의 일정 비율 아래로 떨어지면 즉시 확정
+
+        왜 필요한가
+          DCA 단계에서는 고정 익절이 꺼져 있고 트레일에만 의존한다. 그런데
+          트레일 되돌림 거리의 하한(DCA_TRAIL_DIST_MIN = 코인 0.3%)이
+          8배 레버리지에서 **포지션 2.4%포인트**에 해당해서, 비례 공식
+          (수익 × 25%)은 수익 9.6% 이상에서만 작동한다. 그 아래에서는
+          항상 2.4%포인트를 고정 반납하므로 고점이 +4% 를 넘지 않으면
+          트레일 익절은 구조적으로 이익을 낼 수 없다.
+
+          실제 사례: 2단계 $240 에서 순수익 $6 → 트레일 청산 $1.
+          이 락이 있었다면 $3 에서 확정된다.
+
+        안전성
+          peak_realized 는 청산 비용까지 뺀 값이라 발동 시점에 반드시 이익이다.
+          즉 이 규칙은 손실을 만들 수 없고, 이익을 줄일 수만 있다 —
+          그것도 "더 큰 이익이 될 수도 있었던" 경우에 한해서.
+        """
+        if not config.PROFIT_LOCK_ENABLED:
+            return False
+        p = self.position
+        if not p or p.peak_realized < config.PROFIT_LOCK_TRIGGER_USD:
+            return False
+        floor = p.peak_realized * config.PROFIT_LOCK_KEEP_RATIO
+        if p.realized_pnl(price) <= floor:
+            logger.info(
+                f"[수익보존락] {p.symbol} 고점 순수익 ${p.peak_realized:+.2f} → "
+                f"${p.realized_pnl(price):+.2f} (하한 ${floor:+.2f}) → 확정 청산"
+            )
+            return True
+        return False
+
     def should_take_profit(self, price: float) -> bool:
         """
         일반 익절: ① pnl_pct >= TAKE_PROFIT_PCT  AND  ② realized_pnl >= MIN_PROFIT_USD
@@ -1006,6 +1047,12 @@ class PaperTrader:
         p = self.position
         if not p:
             return False
+
+        # 수익 보존 락 — 손에 쥘 수 있었던 수익을 되돌려주지 않는다.
+        # 트레일보다 먼저 본다. 이 조건은 **이익 구간에서만** 발동하므로
+        # 손실을 만들 수 없고, 늦게 반응하는 트레일의 구멍만 메운다.
+        if self.is_profit_lock_hit(price):
+            return True
 
         # 트레일링 손절가 터치 → 트레일 익절 (하드캡 포함 항상 유효)
         if p.is_trail_hit(price):
@@ -1046,6 +1093,9 @@ class PaperTrader:
 
     def take_profit_reason(self, price: float) -> str:
         p = self.position
+        if p and self.is_profit_lock_hit(price):
+            return (f"수익보존락(고점${p.peak_realized:+.2f}→"
+                    f"순${p.realized_pnl(price):+.2f})")
         if p and p.is_trail_hit(price):
             use_dca_trail = p.avg_down_step >= config.DCA_TRAIL_STEP_THRESHOLD
             prefix = f"DCA{p.avg_down_step}트레일" if use_dca_trail else "트레일"
@@ -1225,6 +1275,11 @@ class PaperTrader:
                 p.mae_usd      = net
                 p.mae_coin_pct = p.coin_pct(price)
                 p.mae_at_s     = at_s
+            # 수익 보존 락 기준 — 계측이 아니라 실제 청산 로직이 쓰는 값이다.
+            # 청산 비용까지 뺀 realized 기준이라 "지금 나가면 손에 쥐는 돈".
+            realized = p.realized_pnl(price)
+            if realized > p.peak_realized:
+                p.peak_realized = realized
         except Exception:
             pass  # 계측 실패가 매매를 막아선 안 된다
 
