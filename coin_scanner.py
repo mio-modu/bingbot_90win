@@ -34,6 +34,15 @@ RECENT_VOL_MIN_1H = 0.005  # 최근 1h 평균 변동폭 최소 0.5% (시장 조�
 # 15m 캔들 기준 (고가-저가)/종가 평균 → 지금 이 순간 활성도
 RECENT_VOL_MIN_15M = 0.002 # 최근 15m 평균 변동폭 최소 0.2% (시장 조용할 때 대응 완화)
 
+# ── 철지난 흐름 차단 ──────────────────────────────────────
+# 매매 방향은 20일 일봉 MA 기울기로 정하는데 실제 보유 시간은 1~2시간이다.
+# 20일 추세가 이미 꺾였는데 그 라벨로 들어가면 지나간 흐름에 올라타는 셈이다.
+REQUIRE_4H_ALIGN = True     # 4h 봉이 반대로 돌았으면 진입 차단
+                            # (기존: 점수만 0.4배 깎고 통과시켰다)
+RECENT_MOVE_LOOKBACK_15M = 6      # 최근 15m 캔들 N개 = 1.5시간
+RECENT_MOVE_MAX_ADVERSE  = 0.003  # 그 구간 실제 가격이 방향과 반대로
+                                  # 0.3% 이상 갔으면 차단 (MA 가 아닌 실제 이동)
+
 # ── 최소 점수 기준 ────────────────────────────────────────
 MIN_SCORE = 0.01  # ADX·일관성 보너스 추가로 점수 스케일 낮아짐 → 기준 하향 (0.05→0.01)
 
@@ -210,7 +219,8 @@ class CoinScanner:
             "거래량부족": 0, "거래량초과": 0, "대형코인": 0,
             "블랙리스트": 0, "키워드제외": 0, "과열": 0,
             "데이터부족": 0, "ATR범위외": 0, "SIDEWAYS": 0,
-            "ADX부족": 0, "일관성부족": 0, "1h역행": 0, "1h변동성": 0, "15m변동성": 0,
+            "ADX부족": 0, "일관성부족": 0, "4h역행": 0, "1h역행": 0, "최근역행": 0,
+            "1h변동성": 0, "15m변동성": 0,
         }
 
         for t in tickers:
@@ -327,7 +337,8 @@ class CoinScanner:
                             )
                             continue
 
-                # ── 현재 변동성 체크 2: 최근 8개 15m 캔들 ──
+                # ── 현재 변동성 체크 2 + 최근 실제 이동 방향 ──
+                recent_move_15m = None
                 try:
                     m15 = self.api.get_klines(symbol, "15m", limit=8)
                     if len(m15) >= 6:
@@ -346,8 +357,38 @@ class CoinScanner:
                                     f"{symbol} 15m 횡보 제외: {recent_vol_15m:.4f} < {RECENT_VOL_MIN_15M}"
                                 )
                                 continue
+
+                        # 최근 1.5시간 실제 가격 이동 (유리한 방향이 +)
+                        closes_15m = [_kline_val(k, "close", 4)
+                                      for k in m15[-RECENT_MOVE_LOOKBACK_15M:]]
+                        if len(closes_15m) >= 2 and closes_15m[0] > 0:
+                            raw = (closes_15m[-1] - closes_15m[0]) / closes_15m[0]
+                            recent_move_15m = raw if trend == "UP" else -raw
                 except Exception:
                     pass
+
+                # ── 철지난 흐름 차단 ────────────────────────
+                # 매매 방향은 **20일 일봉 MA 기울기**로 정하는데 실제 보유 시간은
+                # 1~2시간이다. 20일 추세가 이미 꺾였는데도 그 라벨로 진입하면
+                # "지나간 흐름"에 올라타는 셈이다.
+                #
+                #   ① 4h 역행 — 4시간 봉이 반대로 돌았다는 건 일봉 추세가
+                #      이미 식었다는 뜻. 기존에는 점수만 0.4배 깎고 통과시켰다.
+                #   ② 최근 1.5시간 실제 가격이 반대로 갔으면 차단.
+                #      MA 기울기가 아니라 **실제 이동**을 본다.
+                if REQUIRE_4H_ALIGN and trend_4h != "SIDEWAYS" and trend_4h != trend:
+                    _f["4h역행"] += 1
+                    logger.debug(f"{symbol} 4h 역행 제외: 일봉={trend} 4h={trend_4h}")
+                    continue
+
+                if (recent_move_15m is not None
+                        and recent_move_15m < -RECENT_MOVE_MAX_ADVERSE):
+                    _f["최근역행"] += 1
+                    logger.debug(
+                        f"{symbol} 최근 1.5h 역행 제외: {recent_move_15m:+.3%} "
+                        f"< -{RECENT_MOVE_MAX_ADVERSE:.3%} (방향 {trend})"
+                    )
+                    continue
 
                 # 일봉·4h·1h 방향이 모두 일치하면 최고 점수
                 matches = sum([
@@ -405,6 +446,8 @@ class CoinScanner:
                     "slope_1h":      slope_1h,
                     "atr_ratio":     atr_ratio,
                     "recent_vol_1h": round(recent_vol_1h, 4),
+                    "recent_move_15m": (round(recent_move_15m, 6)
+                                        if recent_move_15m is not None else None),
                     "change_24h":    change_24h,
                     "momentum_ok":   momentum_ok,
                     "adx":           adx,

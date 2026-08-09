@@ -223,12 +223,90 @@ def main():
                test_adx_filter_blocks_chop,
                test_min_score_is_effectively_no_filter,
                test_ledger_detects_drift,
-               test_ledger_skips_when_unsafe]:
+               test_ledger_skips_when_unsafe,
+               test_stale_trend_blocked,
+               test_fresh_trend_still_passes]:
         fn()
     print("\n" + "=" * 62)
     print("  ✅ 전부 통과")
     print("=" * 62)
 
+
+
+
+# ── 철지난 흐름 차단 ─────────────────────────────────────────
+
+def series(n, start, step, rng=1.0):
+    """단조 추세 캔들"""
+    out, p = [], start
+    for _ in range(n):
+        o, c = p, p + step
+        out.append([0, o, max(o, c) + rng, min(o, c) - rng, c, 1000])
+        p = c
+    return out
+
+
+class StaleAPI(ScanAPI):
+    """타임프레임별로 다른 흐름을 주는 가짜 거래소.
+
+    일봉은 하락(20일 추세) 인데 4h·15m 은 이미 반등한 상황을 만든다.
+    = 사용자가 지적한 "철지난 흐름" 그대로.
+    """
+    def __init__(self, daily, h4, h1, m15):
+        self.data = {"1d": daily, "4h": h4, "1h": h1, "15m": m15}
+
+    def get_all_tickers(self):
+        return [{"symbol": "STALE-USDT",
+                 "quoteVolume": str((config.MIN_VOLUME_USDT + config.MAX_VOLUME_USDT) / 2),
+                 "priceChangePercent": "-3.0",
+                 "lastPrice": str(self.data["1d"][-1][4])}]
+
+    def get_klines(self, symbol, interval, limit=100):
+        k = self.data.get(interval, [])
+        return k[-limit:] if limit else k
+
+
+def test_stale_trend_blocked():
+    """★ 일봉은 하락인데 4h 가 이미 반등 → 진입하면 안 된다"""
+    print("\n[6] ★ 철지난 흐름 차단 — 일봉 DOWN, 4h 이미 반등")
+    daily = series(40, 200.0, -3.0, rng=4.0)      # 20일 하락
+    h4    = series(20, 100.0, +1.5, rng=1.0)      # 4h 는 상승 반전
+    h1    = series(12, 100.0, +0.2, rng=0.5)      # 1h 도 약상승
+    m15   = series(8,  100.0, +0.5, rng=0.4)      # 최근 1.5h 상승
+
+    api = StaleAPI(daily, h4, h1, m15)
+    picked = {c["symbol"] for c in CoinScanner(api).scan()}
+    print(f"    선정 결과: {picked or '없음'}")
+    assert "STALE-USDT" not in picked, \
+        "일봉 하락 라벨로 숏 진입했다 — 철지난 흐름 차단 실패"
+    print("    ✅ 차단됨")
+
+    saved4 = coin_scanner.REQUIRE_4H_ALIGN
+    savedm = coin_scanner.RECENT_MOVE_MAX_ADVERSE
+    coin_scanner.REQUIRE_4H_ALIGN = False
+    coin_scanner.RECENT_MOVE_MAX_ADVERSE = 9.0     # 사실상 해제
+    try:
+        picked_off = {c["symbol"] for c in CoinScanner(api).scan()}
+        print(f"    필터 해제 시: {picked_off or '없음'}")
+        assert "STALE-USDT" in picked_off, "필터를 껐는데도 안 뽑힘 — 다른 이유로 걸림"
+    finally:
+        coin_scanner.REQUIRE_4H_ALIGN = saved4
+        coin_scanner.RECENT_MOVE_MAX_ADVERSE = savedm
+    print("    ✅ 새 필터가 원인임을 확인 (껐더니 통과 = 예전엔 이게 들어갔다)")
+
+
+def test_fresh_trend_still_passes():
+    """모든 타임프레임이 같은 방향이면 통과해야 한다"""
+    print("\n[7] 흐름이 살아있으면 통과하는가")
+    daily = series(40, 200.0, -3.0, rng=4.0)      # 하락
+    h4    = series(20, 100.0, -1.5, rng=1.0)      # 4h 도 하락
+    h1    = series(12, 100.0, -0.3, rng=0.5)      # 1h 도 하락
+    m15   = series(8,  100.0, -0.5, rng=0.4)      # 최근도 하락
+    api = StaleAPI(daily, h4, h1, m15)
+    picked = {c["symbol"] for c in CoinScanner(api).scan()}
+    print(f"    선정 결과: {picked or '없음'}")
+    assert "STALE-USDT" in picked, "전 구간 하락인데 차단됐다 — 너무 엄격"
+    print("    ✅ 통과")
 
 if __name__ == "__main__":
     main()

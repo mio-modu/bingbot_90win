@@ -200,6 +200,7 @@ def _entry_quality(trades: list[dict]) -> list[dict]:
         ("atr_ratio",     "변동성 ATR"),
         ("recent_vol_1h", "현재 변동성 1h"),
         ("change_24h",    "24h 등락률"),
+        ("recent_move_15m", "최근 1.5h 이동"),
     ]
     out = []
     for key, label in metrics:
