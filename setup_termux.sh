@@ -132,6 +132,9 @@ cat <<EOF
        설치 후 한 번 실행해야 활성화됩니다
     3) 노트북 봇이 같은 계좌로 돌고 있다면 먼저 끄세요
 
+  ★ 켜기 전에 연결 점검 (조회만, 주문 없음)
+      cd $BOT_DIR && python check_connection.py
+
   봇 시작
       cd $BOT_DIR && ./run.sh
 

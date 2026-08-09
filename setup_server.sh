@@ -158,6 +158,7 @@ cat <<EOF
 
   폰에서 쓸 명령어 (SSH 앱: Termius / JuiceSSH)
 
+    연결점검 : cd $BOT_DIR && ./venv/bin/python check_connection.py
     상태     : sudo systemctl status bingx-bot
     중지     : sudo systemctl stop bingx-bot
     시작     : sudo systemctl start bingx-bot
