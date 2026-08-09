@@ -31,3 +31,14 @@ venv/
 .vscode/
 .idea/
 *.bak_*
+
+# ── 가져올 과거 기록 (history/) ──────────────────────
+# 다른 PC 의 모의투자 기록을 여기에 복사해 두면 import_history.py 가 읽는다.
+# 거래 기록은 추적하되 비밀은 어떤 경우에도 들어가지 않도록 재차단한다.
+!history/
+!history/**/*.json
+!history/**/*.jsonl
+!history/**/*.log
+history/**/.env*
+history/**/*.key
+history/**/*.pem

@@ -39,6 +39,7 @@ python close_all.py
 | `trade_journal.py` | 청산 거래를 `trades.jsonl`에 영구 append (분석용 원장) |
 | `analyze.py` | 저널 기반 손실 분석 리포트 (읽기 전용) |
 | `evolve.py` | config 변경안 **제안만** 생성 (자동 적용 안 함) |
+| `import_history.py` | 다른 봇·다른 PC 의 과거 기록을 저널로 합치기 (읽기 전용) |
 | `risk_governor.py` | 자본 보존 감독자 — 낙폭·연속손실·수익반납 시 시드 축소/중지 |
 | `LESSONS.md` | 과거 봇 8개 교차 분석 — 무엇이 왜 실패했는가 |
 | `tests/` | 안전장치 테스트 (실주문 없음 — 전부 가짜 거래소) |
@@ -58,6 +59,7 @@ python tests/test_risk_governor.py # 개별
 | `test_exchange_stop.py` | STOP 배치/재배치/정리·단계별 위치·API 장애·유령 포지션 정리 |
 | `test_risk_governor.py` | 낙폭·연속손실 사다리, 수익 반납, **데드락 방지**, 상태 영속 |
 | `test_profit_lock.py` | 비용 구조·트레일 하한 지배·실측 사례 재현·손실 불가능성 |
+| `test_import_history.py` | MFE 역산(두 경로)·방향 처리·중복 제거·로그 파싱·분석 연동 |
 | `test_engine_smoke.py` | 엔진 기동·tick·배선 연결·진입 차단 |
 
 > `test_risk_governor.py` 의 데드락 검증이 가장 중요하다. "4연패 → 정지" 를
@@ -82,6 +84,33 @@ python analyze.py --json      # 기계 판독용
 
 리포트는 청산사유·DCA단계·코인·방향·시간대별 손익 귀속, 손익분기 승률,
 그리고 손절 한도 후보별 총손익 스캔을 출력한다.
+
+### 과거 기록 가져오기 (`import_history.py`)
+
+다른 PC 의 모의투자 기록, 다른 봇의 `state.json`, 옛날 `bot.log` 를 저널로 합친다.
+원본 파일은 건드리지 않는다.
+
+```bash
+python import_history.py ~/기록폴더 --tag paper --dry-run   # 먼저 확인
+python import_history.py ~/기록폴더 --tag paper             # 실제 반영
+python analyze.py
+```
+
+지원 형식: `state*.json`(closed_trades 배열) · `trades.jsonl` · `bot.log`(청산 줄).
+`state*.json` 과 `.bak` 에 같은 거래가 중복돼 있어도 알아서 걸러낸다.
+
+**MFE 역산** — 구 기록에는 실시간 계측값이 없지만 `peak_price` 가 남아 있어
+"보유 중 최고 수익"을 되살릴 수 있다. 두 경로를 쓴다.
+
+1. `total_invested` 가 있으면 (90win 계열): `투입 × 유리변화율 × 레버리지`
+2. 없으면 (슬롯형): `pnl`·`비용`·가격으로 **수량을 역산** — 레버리지를 몰라도 정확하다
+
+> `peak_price` 는 DCA 때마다 리셋되므로, DCA 를 거친 거래에서는 마지막 단계
+> 이후의 고점만 반영된다. 즉 역산값은 **실제 MFE 의 하한선**이고, 실제로 놓친
+> 수익은 그보다 크다. 리포트에서 `추정` 으로 따로 표시된다.
+
+모의투자 기록은 슬리피지·체결 실패·마진 부족이 없어 **실제보다 좋게 나온다.**
+리포트의 `출처별` 표에서 분리해 볼 수 있다.
 
 ### 변경 제안 (`evolve.py`)
 

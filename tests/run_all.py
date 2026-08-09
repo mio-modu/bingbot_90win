@@ -18,6 +18,7 @@ SUITE = [
     ("거래소 강제 손절 백스톱", "test_exchange_stop.py"),
     ("리스크 거버너",          "test_risk_governor.py"),
     ("수익 보존 락",           "test_profit_lock.py"),
+    ("과거 기록 가져오기",     "test_import_history.py"),
     ("엔진 기동 스모크",       "test_engine_smoke.py"),
 ]
 

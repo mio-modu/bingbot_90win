@@ -122,6 +122,28 @@ def _hour_kst(t: dict):
 #  MFE / MAE 진단
 # ────────────────────────────────────────────────────────────
 
+def _estimated_missed(trades: list[dict], min_profit: float) -> dict:
+    """가져온 과거 기록의 peak_price 로 역산한 MFE 기반 '놓친 익절'
+
+    실시간 계측이 아니라 peak_price 역산이라 정확도가 떨어진다.
+    특히 peak_price 는 DCA 때마다 리셋되므로 DCA 를 거친 거래에서는
+    마지막 단계 이후의 고점만 반영된다 — **실제 MFE 의 하한선**이다.
+    즉 여기 나오는 '놓친 수익'은 실제보다 작게 잡힌 값이다.
+    """
+    est = [t for t in trades if t.get("mfe_estimated") and "mfe_est_usd" in t]
+    if not est:
+        return {"n": 0}
+    losers = [t for t in est if t.get("pnl", 0.0) <= 0]
+    missed = [t for t in losers if t.get("mfe_est_usd", 0.0) >= min_profit]
+    return {
+        "n":            len(est),
+        "losers":       len(losers),
+        "missed_n":     len(missed),
+        "missed_ratio": len(missed) / len(losers) if losers else 0.0,
+        "missed_value": sum(t.get("mfe_est_usd", 0.0) for t in missed),
+    }
+
+
 def _excursion_report(trades: list[dict], min_profit: float) -> dict:
     """
     MFE(최대 유리) / MAE(최대 불리) 기반 진단.
@@ -222,6 +244,8 @@ def build_report(trades: list[dict], min_profit: float = 2.0) -> dict:
                             [t for t in trades if _hour_kst(t) is not None],
                             lambda t: f"{_hour_kst(t):02d}시 (KST)")],
         "excursion":    _excursion_report(trades, min_profit),
+        "estimated":    _estimated_missed(trades, min_profit),
+        "by_source":    [(k, v) for k, v in _group(trades, lambda t: t.get("source_tag") or "live")],
         "stop_scan":    _stop_scan(trades),
     }
 
@@ -328,6 +352,10 @@ def print_report(rep: dict, min_profit: float, period_label: str):
     _fmt_group("DCA 단계별", rep["by_step"])
     _fmt_group("방향별", rep["by_trend"])
     _fmt_group("코인별 (손실 큰 순)", rep["by_symbol"], limit=10)
+    if len(rep["by_source"]) > 1:
+        _fmt_group("출처별", rep["by_source"], limit=10,
+                   note="가져온 기록과 실거래를 섞어 보고 있습니다 — "
+                        "모의투자는 슬리피지·체결실패가 없어 실제보다 좋게 나옵니다.")
     if rep["by_hour"]:
         _fmt_group("시간대별 (진입 시각 KST)", rep["by_hour"], limit=24)
 
@@ -345,6 +373,16 @@ def print_report(rep: dict, min_profit: float, period_label: str):
         print(f"   익절거래 역행폭 분포 : p50 -${ex['win_mae_p50']:.2f} / "
               f"p90 -${ex['win_mae_p90']:.2f} / p99 -${ex['win_mae_p99']:.2f} / "
               f"최악 -${ex['win_mae_max']:.2f}")
+
+    est = rep["estimated"]
+    if est.get("n"):
+        print("\n── 놓친 익절 (가져온 기록, peak_price 역산) " + "─" * 14)
+        print(f"   대상 거래           : {est['n']}건 (손실 {est['losers']}건)")
+        print(f"   한때 +${min_profit} 이상 : {est['missed_n']}건 "
+              f"({est['missed_ratio']*100:.0f}% of 손실거래)")
+        print(f"   합계                : ${est['missed_value']:,.2f}")
+        print("   ※ peak_price 는 DCA 때마다 리셋되므로 실제 MFE 의 하한선이다.")
+        print("     실제로 놓친 수익은 이보다 크다.")
 
     scan = rep["stop_scan"]
     if scan:
