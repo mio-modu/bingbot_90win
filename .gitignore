@@ -12,6 +12,7 @@ engine_state.json
 governor_state.json
 trades.jsonl
 proposals/
+report.txt
 *_backup_*.json
 _archive_*/
 
