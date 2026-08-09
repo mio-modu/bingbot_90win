@@ -13,6 +13,7 @@ from enum import Enum
 from bingx_api import BingXAPI
 from coin_scanner import CoinScanner
 from paper_trader import PaperTrader
+from risk_governor import RiskGovernor
 import config
 from config import (
     SCAN_INTERVAL_MIN, RESCAN_AFTER_EXIT_MIN,
@@ -41,9 +42,11 @@ class BotState(Enum):
 
 class StrategyEngine:
     def __init__(self):
-        self.api     = BingXAPI()
-        self.scanner = CoinScanner(self.api)
-        self.pt      = PaperTrader(live_api=self.api)
+        self.api      = BingXAPI()
+        self.scanner  = CoinScanner(self.api)
+        self.governor = RiskGovernor(config)
+        self.pt       = PaperTrader(live_api=self.api, governor=self.governor)
+        self.governor.update_equity(self.pt.total_capital + self.pt.total_pnl)
         self.state   = BotState.IN_POSITION if self.pt.position else BotState.IDLE
         self._last_scan_time  = 0.0
         self._last_exit_time  = 0.0
@@ -518,6 +521,15 @@ class StrategyEngine:
         빠른 스캔으로 가장 급락하는 코인 선택 → 전체 자본의 50%로 SHORT 진입.
         DCA 없음, 급락 전용 트레일링, 15분 강제 탈출.
         """
+        # 급락 SHORT 는 자본의 25%를 한 번에 넣는 고위험 진입이다.
+        # 거버너가 브레이크를 걸고 있으면 여기서도 막는다.
+        equity = self.pt.total_capital + self.pt.total_pnl
+        ok, why = self.governor.can_enter(equity)
+        if not ok:
+            logger.warning(f"[거버너차단] 급락SHORT 보류 — {why}")
+            self._exit_crash_mode()
+            return
+
         blocked = self._all_blocked
         candidates = self.scanner.scan_crash_shorts(blocked=blocked)
         if not candidates:
@@ -527,7 +539,7 @@ class StrategyEngine:
 
         coin  = candidates[0]
         price = self.api.get_price(coin["symbol"])
-        invest = (self.pt.total_capital + self.pt.total_pnl) * CRASH_SHORT_SEED_RATIO
+        invest = equity * CRASH_SHORT_SEED_RATIO * self.governor.seed_multiplier(equity)
 
         logger.warning(
             f"[급락SHORT] {coin['symbol']} | 24h {coin['change_24h']:+.2%} | "
@@ -557,6 +569,14 @@ class StrategyEngine:
     def _enter(self, coin: dict):
         symbol = coin["symbol"]
         trend  = coin["trend"]
+
+        # 리스크 거버너: 낙폭·연속손실·수익반납 중이면 신규 진입 차단.
+        # 보유 포지션에는 관여하지 않는다 — 청산 판단은 전략의 몫이다.
+        equity = self.pt.total_capital + self.pt.total_pnl
+        ok, why = self.governor.can_enter(equity)
+        if not ok:
+            logger.warning(f"[거버너차단] {symbol} 진입 보류 — {why}")
+            return
 
         # 진입 전 거래소에 열린 포지션 없는지 확인 (이전 청산 실패 방지)
         if config.LIVE_TRADING:
@@ -635,6 +655,9 @@ class StrategyEngine:
 
         # 날짜 변경 시 방향별 손실 카운터 초기화
         self._reset_daily_loss_if_needed()
+
+        # 거버너에 확정 자본 보고 (고점·당일 기준선 갱신)
+        self.governor.update_equity(self.pt.total_capital + self.pt.total_pnl)
 
         # ── 매 틱: BTC 가격 히스토리 업데이트 (시장충격 감지용) ──
         btc_shock_this_tick = self._update_btc_and_check_shock()
@@ -1338,6 +1361,7 @@ class StrategyEngine:
         logger.info(f"  거래 횟수    : {s['total_trades']}회 "
                     f"({s['win_count']}W / {s['loss_count']}L) "
                     f"승률 {s['win_rate']}%")
+        logger.info(f"  거버너       : {self.governor.status_line(s['current_capital'])}")
         # 일일 총 손실 현황
         total_loss_limit = config.DAILY_TOTAL_LOSS_LIMIT
         if self._daily_total_loss < 0:

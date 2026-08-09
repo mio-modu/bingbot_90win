@@ -347,8 +347,9 @@ def _apply_slip(price: float, trend: str, entry: bool) -> float:
 # ────────────────────────────────────────────────────────────
 
 class PaperTrader:
-    def __init__(self, live_api=None):
+    def __init__(self, live_api=None, governor=None):
         self.live_api = live_api
+        self.governor = governor         # RiskGovernor (없으면 시드 축소 없음)
         self._qty_precision: dict = {}   # {symbol: 소수점 자릿수} 캐시
         self.total_capital:      float = config.TOTAL_CAPITAL
         self.position: Optional[Position] = None
@@ -748,13 +749,28 @@ class PaperTrader:
         base_seed = config.INITIAL_POSITION_USD + increments * config.DYNAMIC_SEED_STEP_USD
         base_seed = max(config.DYNAMIC_SEED_MIN_USD, min(base_seed, config.DYNAMIC_SEED_MAX_USD))
         capital_ratio_cap = capital * config.DYNAMIC_SEED_CAPITAL_RATIO
-        return min(base_seed, capital_ratio_cap)
+        seed = min(base_seed, capital_ratio_cap)
+
+        # 리스크 거버너: 낙폭·연속손실 중이면 시드를 줄인다.
+        # 배율 0(진입 중지)이면 최소 시드로 떨어뜨린다 — 진입은 can_enter() 가
+        # 따로 막지만, 이 함수를 쓰는 다른 경로가 전액 시드를 집어가지 않도록.
+        if self.governor is not None:
+            mult = self.governor.seed_multiplier(capital)
+            seed = max(config.DYNAMIC_SEED_MIN_USD, seed * mult)
+        return seed
 
     def _get_max_loss_usd(self) -> float:
         """동적 손절 한도: -min(시드 × SEED_MULT, CEILING)
         CEILING은 절대 상한 — 자본이 커져도 1회 손실이 이 금액을 넘지 않는다.
-        시드 $60 → min(240, 250) = $240 / 시드 $135 → min(540, 250) = $250"""
-        seed = self._get_initial_position_usd()
+        시드 $60 → min(240, 250) = $240 / 시드 $135 → min(540, 250) = $250
+
+        보유 중에는 **진입 당시 시드**를 기준으로 한다. 현재 시드로 계산하면
+        거버너가 시드를 줄이는 순간 이미 열려 있는 포지션의 손절선이 함께
+        당겨져 조기 손절되기 때문이다."""
+        if self.position and self.position.initial_invest > 0:
+            seed = self.position.initial_invest
+        else:
+            seed = self._get_initial_position_usd()
         cap  = min(seed * config.MAX_NET_LOSS_SEED_MULT, config.MAX_NET_LOSS_CEILING)
         return -cap
 
@@ -874,6 +890,14 @@ class PaperTrader:
             "capital_after":  round(self.total_capital + self.total_pnl, 2),
         })
         trade_journal.append(journal_rec)
+
+        # 거버너에 결과 통보 — 연속 손실 카운터·고점 갱신
+        if self.governor is not None:
+            try:
+                self.governor.record_trade(pnl)
+                self.governor.update_equity(self.total_capital + self.total_pnl)
+            except Exception as e:
+                logger.warning(f"[거버너] 통보 실패(무시): {e}")
 
         self.position = None
 
