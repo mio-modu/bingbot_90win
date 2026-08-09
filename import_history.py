@@ -28,7 +28,11 @@ import glob
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
+
+# 어느 디렉터리에서 실행하든 동작하도록 스크립트 위치를 경로에 넣는다
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import trade_journal
 
@@ -239,8 +243,17 @@ def collect(root: str, tag: str, leverage: int) -> list[dict]:
         else:
             recs = _from_closed_trades(p, tag, leverage)
         if recs:
-            print(f"  · {name:<34} {len(recs):>5}건")
+            # 어느 봇 폴더에서 나온 건지 보이도록 상위 폴더명까지 표시
+            parent = os.path.basename(os.path.dirname(p)) or "."
+            print(f"  · {parent}/{name:<28} {len(recs):>5}건")
             found += recs
+
+    if not paths:
+        print("  ! 이 경로에서 기록 파일을 찾지 못했습니다.")
+        print("    찾는 형식: state*.json / *.jsonl / *.log / *.old / *.bak")
+    elif not found:
+        print(f"  ! 파일 {len(paths)}개를 찾았지만 거래 기록이 없습니다.")
+        print("    (closed_trades 가 비었거나 형식이 다를 수 있습니다)")
     return found
 
 
