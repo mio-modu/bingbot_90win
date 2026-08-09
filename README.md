@@ -105,13 +105,20 @@ BingX 서브계좌를 만들어 봇 자금만 옮기고 **그 서브계좌의 AP
 상태 확인·중지·재시작·긴급청산이 가능하다.**
 
 ```bash
-git clone https://github.com/mio-modu/bingbot_90win /opt/bingx-bot
+# ⚠ 브랜치를 반드시 지정할 것 — 이 저장소의 기본 브랜치(master)는
+#   2026-05-09 자 옛 페이퍼 봇이라 실거래 코드가 아니다.
+git clone -b claude/github-push-time-check-ioamx1 \
+    https://github.com/mio-modu/bingbot_90win /opt/bingx-bot
 cd /opt/bingx-bot && bash setup_server.sh
+
+# 다른 봇(노트북 등)이 아직 같은 계좌로 돌고 있다면:
+bash setup_server.sh --no-start     # 설치만 하고 봇은 안 켠다
 ```
 
-설치 스크립트가 하는 일: 패키지(python3·git) 설치 → 가상환경 → API 키 입력
-(입력 시 화면에 안 보이고 `.env` 는 권한 600) → **안전장치 테스트 실행,
-실패하면 설치 중단** → systemd 서비스 등록·기동.
+설치 스크립트가 하는 일: **올바른 코드인지 확인**(`LIVE_TRADING=True` 와
+`tests/` 존재 — 아니면 즉시 중단) → 패키지(python3·git) 설치 → 가상환경 →
+API 키 입력(화면에 안 보이고 `.env` 는 권한 600) → **안전장치 테스트 실행,
+실패하면 설치 중단** → systemd 등록 → 기동(`--no-start` 면 등록만).
 
 폰에서 쓰는 명령 (Termius / JuiceSSH):
 

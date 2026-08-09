@@ -5,11 +5,25 @@
 #  노트북이 아니라 클라우드 서버에서 24시간 돌리기 위한 설치본.
 #  설치 후에는 폰의 SSH 앱만으로 상태 확인·중지·재시작이 가능하다.
 #
-#  사용법:
-#    git clone https://github.com/mio-modu/bingbot_90win /opt/bingx-bot
+#  사용법 (브랜치를 반드시 지정할 것 — 기본 브랜치는 옛 페이퍼 봇이다):
+#    git clone -b claude/github-push-time-check-ioamx1 \
+#        https://github.com/mio-modu/bingbot_90win /opt/bingx-bot
 #    cd /opt/bingx-bot && bash setup_server.sh
+#
+#  설치만 하고 봇은 나중에 켜려면:
+#    bash setup_server.sh --no-start
+#    (노트북 봇이 아직 돌고 있다면 반드시 이걸 쓸 것 — 같은 계좌에 두 봇이
+#     주문을 내면 서로의 포지션을 오인한다)
 # ============================================================
 set -euo pipefail
+
+NO_START=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-start) NO_START=1 ;;
+        *) echo "알 수 없는 옵션: $arg"; exit 1 ;;
+    esac
+done
 
 BOT_DIR="${BOT_DIR:-/opt/bingx-bot}"
 # 실제 로그인 사용자를 쓴다. 예전 버전은 "ubuntu" 로 하드코딩돼 있어서
@@ -22,6 +36,33 @@ echo "  BingX Bot 서버 설치"
 echo "  설치 위치 : $BOT_DIR"
 echo "  실행 사용자: $SERVICE_USER"
 echo "======================================"
+
+# ── 0. 올바른 코드인지 확인 ─────────────────────────────────
+# 이 저장소의 기본 브랜치(master)는 옛 페이퍼 봇이다.
+# 브랜치를 지정하지 않고 clone 하면 실거래 코드가 아닌 것이 받아진다.
+echo "[0/6] 코드 확인..."
+if [ ! -f config.py ] || [ ! -f main.py ]; then
+    echo "  ✗ config.py / main.py 가 없습니다. 봇 폴더에서 실행하세요."
+    exit 1
+fi
+CUR_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '(git 아님)')"
+echo "  브랜치: $CUR_BRANCH"
+if ! grep -qE '^LIVE_TRADING\s*=\s*True' config.py; then
+    echo ""
+    echo "  ✗ config.py 에 LIVE_TRADING = True 가 없습니다."
+    echo "    실거래 코드가 아닌 브랜치를 받은 것 같습니다."
+    echo "    (이 저장소의 기본 브랜치 master 는 옛 페이퍼 봇입니다)"
+    echo ""
+    echo "    올바른 받기:"
+    echo "      git clone -b claude/github-push-time-check-ioamx1 \\"
+    echo "          https://github.com/mio-modu/bingbot_90win $BOT_DIR"
+    exit 1
+fi
+if [ ! -d tests ]; then
+    echo "  ✗ tests/ 폴더가 없습니다 — 안전장치가 없는 옛 코드입니다."
+    exit 1
+fi
+echo "  ✅ 실거래 코드 확인 (LIVE_TRADING=True, 테스트 포함)"
 
 # ── 1. 시스템 패키지 ────────────────────────────────────────
 echo "[1/6] 패키지 설치..."
@@ -89,14 +130,23 @@ sed -e "s|^User=.*|User=$SERVICE_USER|" \
 sudo cp /tmp/bingx-bot.service /etc/systemd/system/bingx-bot.service
 sudo systemctl daemon-reload
 sudo systemctl enable bingx-bot
-sudo systemctl restart bingx-bot
-sleep 3
 
 echo ""
 echo "======================================"
-sudo systemctl is-active --quiet bingx-bot \
-    && echo "  ✅ 설치 완료 — 봇이 돌고 있습니다" \
-    || echo "  ⚠ 서비스가 뜨지 않았습니다. 아래 status 로 확인하세요"
+if [ "$NO_START" = "1" ]; then
+    sudo systemctl stop bingx-bot 2>/dev/null || true
+    echo "  ✅ 설치 완료 — 봇은 **시작하지 않았습니다** (--no-start)"
+    echo ""
+    echo "  다른 봇(노트북 등)이 같은 계좌로 돌고 있지 않은지 확인한 뒤"
+    echo "  아래로 시작하세요:"
+    echo "      sudo systemctl start bingx-bot"
+else
+    sudo systemctl restart bingx-bot
+    sleep 3
+    sudo systemctl is-active --quiet bingx-bot \
+        && echo "  ✅ 설치 완료 — 봇이 돌고 있습니다" \
+        || echo "  ⚠ 서비스가 뜨지 않았습니다. 아래 status 로 확인하세요"
+fi
 echo "======================================"
 cat <<EOF
 
