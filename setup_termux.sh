@@ -63,8 +63,10 @@ echo "[1/5] 패키지 설치..."
 pkg update -y >/dev/null 2>&1 || true
 # numpy 는 pip 로 빌드하면 안드로이드에서 실패하기 쉽다.
 # Termux 가 미리 빌드해 둔 python-numpy 를 쓴다.
-pkg install -y python python-numpy git >/dev/null
-pip install --quiet --upgrade pip
+pkg install -y python python-pip python-numpy git >/dev/null
+# ⚠ Termux 에서 `pip install --upgrade pip` 는 금지돼 있다.
+#   ("Installing pip is forbidden, this will break the python-pip package")
+#   pip 는 pkg 가 관리하므로 건드리지 않는다.
 pip install --quiet requests python-dotenv
 echo "  ✅ python / numpy / requests / python-dotenv"
 
