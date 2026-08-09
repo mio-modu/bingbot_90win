@@ -28,6 +28,15 @@ AUTH_CODES = {
 }
 
 
+def _repeat_count(s: str) -> int:
+    """같은 조각이 몇 번 이어붙었는지. 반복이 아니면 1."""
+    n = len(s)
+    for k in (2, 3, 4, 5):
+        if n % k == 0 and n // k >= 8 and s[:n // k] * k == s:
+            return k
+    return 1
+
+
 def _mask(s: str) -> str:
     """키를 화면에 찍을 때 앞뒤만 남긴다. 로그 캡처로 새는 걸 막는다."""
     if not s:
@@ -58,6 +67,25 @@ def main() -> int:
         return 1
     print(f"{OK}API_KEY    {_mask(config.API_KEY)}")
     print(f"{OK}SECRET_KEY {_mask(config.SECRET_KEY)}")
+
+    # 시크릿은 화면에 안 보이게 입력받으므로 "안 들어갔나?" 싶어 두세 번
+    # 붙여넣는 일이 잦다. 그러면 같은 문자열이 이어붙어 서명이 깨진다.
+    bad_input = False
+    for label, val in (("API_KEY", config.API_KEY), ("SECRET_KEY", config.SECRET_KEY)):
+        rep = _repeat_count(val)
+        if rep > 1:
+            print(f"{BAD}{label} 가 같은 내용이 {rep}번 이어붙어 있습니다 "
+                  f"— 여러 번 붙여넣은 것입니다.")
+            bad_input = True
+        elif len(val) > 200:
+            print(f"{WARN}{label} 가 {len(val)}자로 비정상적으로 깁니다.")
+            bad_input = True
+        elif val != val.strip():
+            print(f"{BAD}{label} 앞뒤에 공백/줄바꿈이 섞여 있습니다.")
+            bad_input = True
+    if bad_input:
+        print("     → 다시 입력하세요:  bash set_keys.sh")
+        return 1
 
     # ── 2. 서버 연결 + 시계 ─────────────────────────────
     # 인증이 필요 없는 요청으로 "인터넷이 되는가"부터 확인한다.
