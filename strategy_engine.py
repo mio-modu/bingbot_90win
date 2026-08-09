@@ -659,6 +659,22 @@ class StrategyEngine:
         # crash_short는 연속익절 카운터 제외 (급락 모드는 별개)
         if not crash_short:
             self._record_win_streak(symbol, last_pnl > 0)
+
+        # ── 같은 코인 재진입 쿨다운 ──────────────────────────
+        # 스캐너는 결정적이라 같은 코인이 계속 1위로 뽑힌다. RESCAN_AFTER_EXIT_MIN=0
+        # 과 겹쳐 청산 직후 같은 코인으로 곧장 재진입하는 일이 반복된다.
+        # (실측: HYPE 17:49 청산 → 같은 분에 HYPE 재진입)
+        # 방금 나온 코인은 잠시 쉬게 해서 스캐너가 다른 후보를 보게 한다.
+        # 손실로 나왔으면 더 길게 — 그 코인에서 반복해서 깎이는 걸 막는다.
+        if not crash_short and config.REENTRY_COOLDOWN_MIN > 0:
+            mins = (config.REENTRY_COOLDOWN_MIN if last_pnl > 0
+                    else config.REENTRY_COOLDOWN_LOSS_MIN)
+            until = time.time() + mins * 60
+            if until > self._blocked_symbols.get(symbol, 0):
+                self._blocked_symbols[symbol] = until
+                logger.info(f"[재진입쿨다운] {symbol} {mins}분 차단 "
+                            f"({'익절' if last_pnl > 0 else '손실'} ${last_pnl:+.2f})")
+
         self._last_exit_time = time.time()
         self.state = BotState.IDLE
 
