@@ -1,24 +1,49 @@
 """
 코인 선정 모듈
 ────────────────
-선정 기준:
-  1. 거래량   : 24h $50M 이상 (유동성)
-  2. 변동성   : 일봉 ATR/가격 3~12% 사이 (물타기 작동에 필요한 변동성)
-  3. 방향성   : 20일 MA 기울기로 UP/DOWN 트렌드 확인
-  4. 트렌드 강도: 단기(4h) + 중기(일봉) MA가 같은 방향으로 정렬
-  5. 과열 제외: 24h 변동폭 ±15% 초과 코인 제외 (급등/급락 직후)
-  6. 현재 변동성: 1h 캔들 기준 최소 0.8% + 15m 캔들 기준 최소 0.4%
-               → 지금 이 순간 실제로 움직이는 코인만 선택
-  7. 최소 점수: 기준 미달 시 전부 제외 → 다음 스캔까지 대기
+RECENCY_ENABLED=True (기본) 일 때의 선정 순서:
 
-최종 점수 = 트렌드강도 × 변동성 × 모멘텀 보정 × 현재변동성 보정
+  [싼 필터 — 티커 한 번으로 끝나는 것]
+  1. 거래량     : 24h $50M ~ $300M (유동성 있고, 너무 둔하지 않은 구간)
+  2. 대형코인·블랙리스트·지수상품 제외
+  3. 과열 제외  : 24h 등락 ±15% 초과 (급등·급락 직후)
+
+  [일봉 — 성질을 본다. 방향은 안 본다]
+  4. 변동성     : 일봉 ATR/가격 3~12%  (물타기가 작동할 만큼 움직이는가)
+
+  [1시간·15분봉 — 방향과 자리를 본다]
+  5. 방향 결정  : 1h MA 기울기 (보조 15m). 4h·일봉은 거부권만.
+  6. 현재 변동성: 최근 6개 1h·15m 캔들이 실제로 움직이는가
+  7. 최근 역행  : 최근 1.5시간 실제 가격이 방향과 반대로 갔으면 제외
+  8. 추세 강도  : **1시간봉** ADX + 최근 10개 1h 캔들의 방향 일관성
+  9. 신선도     : 과신장(평균에서 몇 ATR) / 노후(몇 봉째) / 감쇠(식는 중)
+
+  10. 최소 점수 미달이면 전부 제외 → 다음 스캔까지 대기
+
+왜 이렇게 바꿨나
+---------------
+예전에는 **20일 일봉 MA 기울기**가 매매 방향을 정했다. 그런데 실제
+보유 시간은 1~2시간이다. 20일 평균이 아직 위를 보고 있어도 어제부터
+꺾였으면, 그 라벨로 롱을 잡는 건 지나간 흐름에 올라타는 것이다.
+4h·1h "역행 차단"을 덧붙여 증상은 막았지만 방향을 고르는 근거는
+그대로였다. 이제 위계를 뒤집었다 — 방향은 최근이 정하고, 과거는
+정면충돌할 때만 거부한다. 자세한 내용은 recency.py 참조.
+
+RECENCY_ENABLED=false 로 두면 예전 방식(일봉 주도)으로 돌아간다.
+
+최종 점수 = 변동성 × 추세강도 × 정렬 × 모멘텀 × 현재활성도
+            × ADX × 일관성 × 신선도
 """
 
 import logging
 import numpy as np
+import recency
 from bingx_api import BingXAPI
 from config import (MIN_VOLUME_USDT, MAX_VOLUME_USDT, TOP_N_COINS, MA_PERIOD,
-                    ADX_MIN_THRESHOLD, CONSISTENCY_MIN)
+                    ADX_MIN_THRESHOLD, CONSISTENCY_MIN,
+                    RECENCY_ENABLED, RECENCY_MAX_EXTENSION_ATR,
+                    RECENCY_MAX_TREND_AGE, RECENCY_MIN_MOMENTUM,
+                    RECENCY_ADX_MIN)
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +246,10 @@ class CoinScanner:
             "데이터부족": 0, "ATR범위외": 0, "SIDEWAYS": 0,
             "ADX부족": 0, "일관성부족": 0, "4h역행": 0, "1h역행": 0, "최근역행": 0,
             "1h변동성": 0, "15m변동성": 0,
+            # 최근 흐름 엔진
+            "최근흐름없음": 0,   # 15m·1h 가 횡보거나 서로 충돌 / 큰 축이 거부
+            "과신장": 0,        # 단기 평균에서 너무 벌어짐 = 늦은 자리
+            "모멘텀감쇠": 0,     # 식어가는 흐름 (나이는 차단 안 함 — 점수만 조정)
         }
 
         for t in tickers:
@@ -278,167 +307,171 @@ class CoinScanner:
                     )
                     continue
 
-                # ── 3. 방향성 (20일 MA 기울기) ───────────
                 slope_d = calc_ma_slope(closes_d, MA_PERIOD)
-                trend   = get_trend(slope_d)
-                if trend == "SIDEWAYS":
-                    _f["SIDEWAYS"] += 1
-                    continue
+                adx_d   = calc_adx(daily)
 
-                # ── 3.5. ADX 추세 강도 ──────────────────────
-                # config 는 "ADX 이하 = 추세 없음 → 진입 차단" 이라고 정의하는데
-                # 실제로는 점수 보너스로만 쓰이고 필터가 없었다 (import 만 하고 미사용).
-                # ADX 5 짜리 완전 횡보 코인도 통과하던 구멍이다.
-                # 물타기 전략은 추세가 있어야 회복하므로 횡보 코인이 가장 위험하다.
-                adx = calc_adx(daily)
-                if adx < ADX_MIN_THRESHOLD:
-                    _f["ADX부족"] += 1
-                    logger.debug(f"{symbol} ADX 부족 제외: {adx:.1f} < {ADX_MIN_THRESHOLD}")
-                    continue
-
-                # ── 4. 단기 트렌드 정렬 (4h + 1h) ──────────
-                slope_4h = slope_1h = 0.0
-                trend_4h = trend_1h = "SIDEWAYS"
+                # ── 3. 단기 캔들 확보 ────────────────────
+                # 1h 는 60개 받는다. ADX(14)를 1시간봉에서 계산하려면
+                # 최소 28개가 필요하고, 흐름 나이는 최대 18봉까지 거슬러
+                # 올라간다. 12개로는 둘 다 불가능했다.
+                closes_4h, hourly1, closes_1h, hl_1h, m15, closes_15m = [], [], [], [], [], []
                 try:
                     hourly4   = self.api.get_klines(symbol, "4h", limit=20)
                     closes_4h = [_kline_val(k, "close", 4) for k in hourly4]
-                    if len(closes_4h) >= 10:
-                        slope_4h = calc_ma_slope(closes_4h, 10)
-                        trend_4h = get_trend(slope_4h)
                 except Exception:
                     pass
-
-                hourly1 = []
                 try:
-                    hourly1   = self.api.get_klines(symbol, "1h", limit=12)
+                    hourly1   = self.api.get_klines(symbol, "1h", limit=60)
                     closes_1h = [_kline_val(k, "close", 4) for k in hourly1]
-                    if len(closes_1h) >= 6:
-                        slope_1h = calc_ma_slope(closes_1h, 6)
-                        trend_1h = get_trend(slope_1h)
+                    hl_1h     = [(_kline_val(k, "high", 2), _kline_val(k, "low", 3),
+                                  _kline_val(k, "close", 4)) for k in hourly1]
+                except Exception:
+                    pass
+                try:
+                    m15        = self.api.get_klines(symbol, "15m", limit=20)
+                    closes_15m = [_kline_val(k, "close", 4) for k in m15]
                 except Exception:
                     pass
 
-                # ── 현재 변동성 체크 1: 최근 6개 1h 캔들 ────
+                slope_4h = calc_ma_slope(closes_4h, 10) if len(closes_4h) >= 11 else 0.0
+                slope_1h = calc_ma_slope(closes_1h, 6)  if len(closes_1h) >= 7  else 0.0
+                trend_4h = get_trend(slope_4h)
+                trend_1h = get_trend(slope_1h)
+
+                # ── 4. 방향 결정 ─────────────────────────
+                if RECENCY_ENABLED:
+                    if len(closes_1h) < 20:
+                        _f["데이터부족"] += 1
+                        continue
+                    verdict = recency.decide_direction(
+                        closes_15m, closes_1h, closes_4h, closes_d)
+                    trend = verdict["trend"]
+                    if trend is None:
+                        _f["최근흐름없음"] += 1
+                        logger.debug(f"{symbol} 방향 없음: {verdict['reason']}")
+                        continue
+                    dir_src   = verdict["src"]
+                    dir_agree = verdict["agree"]
+                else:
+                    # 예전 방식 — 20일 일봉 MA 가 방향을 정한다
+                    trend = get_trend(slope_d)
+                    if trend == "SIDEWAYS":
+                        _f["SIDEWAYS"] += 1
+                        continue
+                    if adx_d < ADX_MIN_THRESHOLD:
+                        _f["ADX부족"] += 1
+                        continue
+                    if REQUIRE_4H_ALIGN and trend_4h != "SIDEWAYS" and trend_4h != trend:
+                        _f["4h역행"] += 1
+                        continue
+                    if trend_1h != "SIDEWAYS" and trend_1h != trend:
+                        _f["1h역행"] += 1
+                        continue
+                    dir_src, dir_agree = "1d", (trend_4h == trend and trend_1h == trend)
+
+                # ── 5. 현재 변동성 (지금 움직이는 코인만) ──
                 recent_vol_1h = 0.0
                 if len(hourly1) >= 6:
-                    recent_ranges = []
-                    for k in hourly1[-6:]:
+                    rr = [(h - l) / c for h, l, c in hl_1h[-6:] if c > 0]
+                    if rr:
+                        recent_vol_1h = float(np.mean(rr))
+                        if recent_vol_1h < RECENT_VOL_MIN_1H:
+                            _f["1h변동성"] += 1
+                            continue
+
+                recent_move_15m = None
+                if len(m15) >= 6:
+                    rr15 = []
+                    for k in m15[-6:]:
                         h = _kline_val(k, "high",  2)
                         l = _kline_val(k, "low",   3)
                         c = _kline_val(k, "close", 4)
                         if c > 0:
-                            recent_ranges.append((h - l) / c)
-                    if recent_ranges:
-                        recent_vol_1h = float(np.mean(recent_ranges))
-                        if recent_vol_1h < RECENT_VOL_MIN_1H:
-                            _f["1h변동성"] += 1
-                            logger.debug(
-                                f"{symbol} 1h 횡보 제외: {recent_vol_1h:.4f} < {RECENT_VOL_MIN_1H}"
-                            )
+                            rr15.append((h - l) / c)
+                    if rr15:
+                        recent_vol_15m = float(np.mean(rr15))
+                        if recent_vol_15m < RECENT_VOL_MIN_15M:
+                            _f["15m변동성"] += 1
                             continue
+                    seg = closes_15m[-RECENT_MOVE_LOOKBACK_15M:]
+                    if len(seg) >= 2 and seg[0] > 0:
+                        raw = (seg[-1] - seg[0]) / seg[0]
+                        recent_move_15m = raw if trend == "UP" else -raw
 
-                # ── 현재 변동성 체크 2 + 최근 실제 이동 방향 ──
-                recent_move_15m = None
-                try:
-                    m15 = self.api.get_klines(symbol, "15m", limit=8)
-                    if len(m15) >= 6:
-                        ranges_15m = []
-                        for k in m15[-6:]:
-                            h = _kline_val(k, "high",  2)
-                            l = _kline_val(k, "low",   3)
-                            c = _kline_val(k, "close", 4)
-                            if c > 0:
-                                ranges_15m.append((h - l) / c)
-                        if ranges_15m:
-                            recent_vol_15m = float(np.mean(ranges_15m))
-                            if recent_vol_15m < RECENT_VOL_MIN_15M:
-                                _f["15m변동성"] += 1
-                                logger.debug(
-                                    f"{symbol} 15m 횡보 제외: {recent_vol_15m:.4f} < {RECENT_VOL_MIN_15M}"
-                                )
-                                continue
-
-                        # 최근 1.5시간 실제 가격 이동 (유리한 방향이 +)
-                        closes_15m = [_kline_val(k, "close", 4)
-                                      for k in m15[-RECENT_MOVE_LOOKBACK_15M:]]
-                        if len(closes_15m) >= 2 and closes_15m[0] > 0:
-                            raw = (closes_15m[-1] - closes_15m[0]) / closes_15m[0]
-                            recent_move_15m = raw if trend == "UP" else -raw
-                except Exception:
-                    pass
-
-                # ── 철지난 흐름 차단 ────────────────────────
-                # 매매 방향은 **20일 일봉 MA 기울기**로 정하는데 실제 보유 시간은
-                # 1~2시간이다. 20일 추세가 이미 꺾였는데도 그 라벨로 진입하면
-                # "지나간 흐름"에 올라타는 셈이다.
-                #
-                #   ① 4h 역행 — 4시간 봉이 반대로 돌았다는 건 일봉 추세가
-                #      이미 식었다는 뜻. 기존에는 점수만 0.4배 깎고 통과시켰다.
-                #   ② 최근 1.5시간 실제 가격이 반대로 갔으면 차단.
-                #      MA 기울기가 아니라 **실제 이동**을 본다.
-                if REQUIRE_4H_ALIGN and trend_4h != "SIDEWAYS" and trend_4h != trend:
-                    _f["4h역행"] += 1
-                    logger.debug(f"{symbol} 4h 역행 제외: 일봉={trend} 4h={trend_4h}")
-                    continue
-
+                # 최근 1.5시간 실제 가격이 방향과 반대로 갔으면 차단.
+                # MA 기울기가 아니라 **실제 이동**을 본다 — 급반전을 잡는다.
                 if (recent_move_15m is not None
                         and recent_move_15m < -RECENT_MOVE_MAX_ADVERSE):
                     _f["최근역행"] += 1
-                    logger.debug(
-                        f"{symbol} 최근 1.5h 역행 제외: {recent_move_15m:+.3%} "
-                        f"< -{RECENT_MOVE_MAX_ADVERSE:.3%} (방향 {trend})"
-                    )
                     continue
 
-                # 일봉·4h·1h 방향이 모두 일치하면 최고 점수
-                matches = sum([
-                    trend_4h == trend,
-                    trend_1h == trend,
-                ])
-                align_bonus = {0: 0.4, 1: 0.9, 2: 1.8}[matches]
+                price = float(t.get("lastPrice", 0))
 
-                # 1h 역행이면 지금 이 흐름 아님 → 제외
-                if trend_1h != "SIDEWAYS" and trend_1h != trend:
-                    _f["1h역행"] += 1
-                    logger.debug(f"{symbol} 1h 역행 제외: 일봉={trend} 1h={trend_1h}")
-                    continue
+                # ── 6. 추세 강도·일관성 ──────────────────
+                # 최근 흐름 모드에서는 1시간봉 기준으로 본다.
+                # 일봉 ADX 는 "며칠짜리 추세"를 재는 값이라, 1~2시간 보유하는
+                # 매매의 진입 근거로는 시간축이 맞지 않는다.
+                if RECENCY_ENABLED:
+                    adx = calc_adx(hourly1) if len(hourly1) >= 30 else 0.0
+                    if adx < RECENCY_ADX_MIN:
+                        _f["ADX부족"] += 1
+                        logger.debug(f"{symbol} 1h ADX 부족: {adx:.1f} < {RECENCY_ADX_MIN}")
+                        continue
+                    consistency = calc_trend_consistency(closes_1h, trend, period=10)
+                    adx_ref = 22.0
+                else:
+                    adx = adx_d
+                    consistency = calc_trend_consistency(closes_d, trend, period=10)
+                    adx_ref = 25.0
 
-                # ── 6. 모멘텀 (현재가 위치) ──────────────
-                price   = float(t.get("lastPrice", 0))
-                ma20_d  = calc_ma(closes_d, 20)
-                momentum_ok = (
-                    (trend == "UP"   and price >= ma20_d) or
-                    (trend == "DOWN" and price <= ma20_d)
-                )
-                momentum_bonus = 1.3 if momentum_ok else 0.7
-
-                # ── 추세 일관성 (최근 10일봉 중 트렌드 방향 비율) ──
-                # MA 기울기는 UP 이라는데 10일 중 4일만 상승 마감이면 추세 라벨을
-                # 믿을 수 없다. 지금까지 점수 보너스로만 쓰이고 하한이 없었다.
-                consistency      = calc_trend_consistency(closes_d, trend, period=10)
                 if consistency < CONSISTENCY_MIN:
                     _f["일관성부족"] += 1
-                    logger.debug(f"{symbol} 일관성 부족 제외: {consistency:.0%} "
-                                 f"< {CONSISTENCY_MIN:.0%}")
                     continue
-                # 0.5(50%)~1.5(100%) 범위 보정: 70% 이상이면 보너스
+
+                # ── 7. 신선도 판정 (과신장 / 노후 / 감쇠) ──
+                fresh = {"ok": True, "bonus": 1.0, "ext": 0.0, "age": 0, "mom": 1.0,
+                         "why": "판정 안 함"}
+                if RECENCY_ENABLED:
+                    fresh = recency.freshness_verdict(
+                        price, closes_1h, hl_1h, trend,
+                        RECENCY_MAX_EXTENSION_ATR,
+                        RECENCY_MAX_TREND_AGE,
+                        RECENCY_MIN_MOMENTUM)
+                    if not fresh["ok"]:
+                        key = "과신장" if "과신장" in fresh["why"] else "모멘텀감쇠"
+                        _f[key] += 1
+                        logger.debug(f"{symbol} {fresh['why']}")
+                        continue
+
+                # ── 8. 큰 그림 모멘텀 (보너스만) ─────────
+                # 일봉 MA 대비 위치. 이제 진입을 막지는 않고 점수만 조정한다.
+                ma20_d      = calc_ma(closes_d, 20)
+                momentum_ok = ((trend == "UP"   and price >= ma20_d) or
+                               (trend == "DOWN" and price <= ma20_d))
+                momentum_bonus = 1.2 if momentum_ok else 0.85
+
+                # ── 9. 점수 ──────────────────────────────
+                align_bonus       = 1.8 if dir_agree else 1.0
                 consistency_bonus = 0.5 + consistency
-
-                # ── ADX 보너스: ADX=25 → ×1.0, ADX=50 → ×2.0 ──
-                adx_bonus = min(adx / 25.0, 2.0)
-
-                # ── 점수 계산 ─────────────────────────────
+                adx_bonus         = min(adx / adx_ref, 2.0)
                 # 변동성 최우선: ATR 6% 근처 최고점
-                vol_score    = atr_ratio * (1 - abs(atr_ratio - 0.06) / 0.10)
-                trend_score  = abs(slope_d) + abs(slope_4h) * 0.5 + abs(slope_1h) * 1.0
-                # 현재 변동성이 높을수록 보정 가중치 증가 (지금 움직이는 코인 우선)
-                live_bonus   = 1.0 + min(recent_vol_1h / RECENT_VOL_MIN_1H, 3.0)
-                score        = (vol_score * trend_score * align_bonus * momentum_bonus
-                                * live_bonus * adx_bonus * consistency_bonus * 1000)
+                vol_score         = atr_ratio * (1 - abs(atr_ratio - 0.06) / 0.10)
+                # 추세 점수: 최근 시간축에 가중치를 싣는다 (기존은 일봉 위주)
+                if RECENCY_ENABLED:
+                    trend_score = (abs(slope_1h) * 1.0 + abs(slope_4h) * 0.3
+                                   + abs(slope_d) * 0.1)
+                else:
+                    trend_score = abs(slope_d) + abs(slope_4h) * 0.5 + abs(slope_1h) * 1.0
+                live_bonus = 1.0 + min(recent_vol_1h / RECENT_VOL_MIN_1H, 3.0)
+
+                score = (vol_score * trend_score * align_bonus * momentum_bonus
+                         * live_bonus * adx_bonus * consistency_bonus
+                         * fresh["bonus"] * 1000)
 
                 candidates.append({
                     "symbol":        symbol,
                     "trend":         trend,
+                    "dir_src":       dir_src,
                     "trend_4h":      trend_4h,
                     "trend_1h":      trend_1h,
                     "slope_d":       slope_d,
@@ -451,7 +484,11 @@ class CoinScanner:
                     "change_24h":    change_24h,
                     "momentum_ok":   momentum_ok,
                     "adx":           adx,
+                    "adx_d":         adx_d,
                     "consistency":   round(consistency, 2),
+                    "fresh_ext":     round(fresh["ext"], 2),
+                    "fresh_age":     fresh["age"],
+                    "fresh_mom":     round(fresh["mom"], 2),
                     "volume":        volume_usdt,
                     "price":         price,
                     "score":         score,
@@ -496,14 +533,19 @@ class CoinScanner:
 
         for c in top:
             mo = "✓" if c["momentum_ok"] else "△"
+            fresh_str = (f" | 신선도(나이{c.get('fresh_age', 0)}봉 "
+                         f"신장{c.get('fresh_ext', 0):+.1f}ATR "
+                         f"모멘텀{c.get('fresh_mom', 0):.2f})"
+                         if RECENCY_ENABLED else "")
             logger.info(
-                f"  {c['symbol']:22s} | {c['trend']:4s} | "
+                f"  {c['symbol']:22s} | {c['trend']:4s}({c.get('dir_src', '?')}) | "
                 f"4h:{_arrow(c['trend_4h'], c['trend'])} "
                 f"1h:{_arrow(c['trend_1h'], c['trend'])} | "
                 f"ATR {c['atr_ratio']:.3f} | ADX {c['adx']:.1f} | "
                 f"일관성 {c['consistency']:.0%} | "
                 f"1h변동 {c['recent_vol_1h']:.4f} | "
-                f"24h {c['change_24h']:+.1%} | 모멘텀{mo} | 점수 {c['score']:.4f}"
+                f"24h {c['change_24h']:+.1%} | 모멘텀{mo}{fresh_str} | "
+                f"점수 {c['score']:.4f}"
             )
         return top
 

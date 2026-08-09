@@ -19,6 +19,7 @@ import risk_governor                                   # noqa: E402
 import paper_trader                                    # noqa: E402
 import config                                          # noqa: E402
 import coin_scanner                                    # noqa: E402
+import recency                                         # noqa: E402
 from coin_scanner import CoinScanner, calc_adx         # noqa: E402
 
 _TMP = tempfile.mkdtemp(prefix="scantest_")
@@ -101,17 +102,26 @@ def test_adx_filter_blocks_chop():
         "횡보 코인이 선정됐다 — ADX 필터가 작동하지 않는다"
     print("    ✅ 횡보 코인 제외됨")
 
-    # 필터를 무력화하면 다시 통과하는지 (필터가 실제로 원인임을 확인)
-    saved = config.ADX_MIN_THRESHOLD
+    # 품질 게이트를 전부 무력화하면 다시 통과하는지 확인한다.
+    # (횡보 코인을 막는 건 ADX 뿐이 아니다 — 최근 흐름 엔진의 모멘텀·신장도
+    #  판정도 함께 막는다. 어느 하나가 아니라 "품질 게이트 묶음"이 원인임을
+    #  보이는 것이 이 테스트의 목적이다.)
+    saved = (coin_scanner.ADX_MIN_THRESHOLD, coin_scanner.RECENCY_ADX_MIN,
+             coin_scanner.RECENCY_MIN_MOMENTUM, coin_scanner.RECENCY_MAX_EXTENSION_ATR)
     coin_scanner.ADX_MIN_THRESHOLD = 0
+    coin_scanner.RECENCY_ADX_MIN = 0.0
+    coin_scanner.RECENCY_MIN_MOMENTUM = -99.0
+    coin_scanner.RECENCY_MAX_EXTENSION_ATR = 999.0
     try:
         picked_off = {c["symbol"] for c in CoinScanner(api).scan()}
-        print(f"    필터 해제 시: {picked_off or '없음'}")
+        print(f"    품질 게이트 해제 시: {picked_off or '없음'}")
         assert "CHOPUSDT-USDT" in picked_off, \
-            "필터를 껐는데도 안 뽑힌다 — 다른 이유로 걸린 것"
+            "게이트를 껐는데도 안 뽑힌다 — 다른 이유로 걸린 것"
     finally:
-        coin_scanner.ADX_MIN_THRESHOLD = saved
-    print("    ✅ 필터가 원인임을 확인 (껐더니 통과)")
+        (coin_scanner.ADX_MIN_THRESHOLD, coin_scanner.RECENCY_ADX_MIN,
+         coin_scanner.RECENCY_MIN_MOMENTUM,
+         coin_scanner.RECENCY_MAX_EXTENSION_ATR) = saved
+    print("    ✅ 품질 게이트가 원인임을 확인 (껐더니 통과)")
 
 
 def test_min_score_is_effectively_no_filter():
@@ -259,10 +269,13 @@ class StaleAPI(ScanAPI):
         self.data = {"1d": daily, "4h": h4, "1h": h1, "15m": m15}
 
     def get_all_tickers(self):
+        # 현재가는 1시간봉 마지막 종가로 준다. 일봉 마지막 종가를 쓰면
+        # 시간축끼리 값이 어긋나 신장도(ATR 배수) 계산이 엉뚱해진다.
+        last = self.data["1h"][-1][4] if self.data.get("1h") else self.data["1d"][-1][4]
         return [{"symbol": "STALE-USDT",
                  "quoteVolume": str((config.MIN_VOLUME_USDT + config.MAX_VOLUME_USDT) / 2),
                  "priceChangePercent": "-3.0",
-                 "lastPrice": str(self.data["1d"][-1][4])}]
+                 "lastPrice": str(last)}]
 
     def get_klines(self, symbol, interval, limit=100):
         k = self.data.get(interval, [])
@@ -272,30 +285,33 @@ class StaleAPI(ScanAPI):
 def test_stale_trend_blocked():
     """★ 일봉은 하락인데 4h 가 이미 반등 → 진입하면 안 된다"""
     print("\n[6] ★ 철지난 흐름 차단 — 일봉 DOWN, 4h 이미 반등")
-    daily = series(40, 200.0, -3.0, rng=4.0)      # 20일 하락
+    daily = series(40, 200.0, -3.0, rng=4.0)      # 20일 하락 (강한 하락)
     h4    = series(20, 100.0, +1.5, rng=1.0)      # 4h 는 상승 반전
-    h1    = series(12, 100.0, +0.2, rng=0.5)      # 1h 도 약상승
-    m15   = series(8,  100.0, +0.5, rng=0.4)      # 최근 1.5h 상승
+    h1    = series(60, 100.0, +0.2, rng=0.5)      # 1h 도 약상승
+    m15   = series(20, 100.0, +0.5, rng=0.4)      # 최근 1.5h 상승
 
     api = StaleAPI(daily, h4, h1, m15)
     picked = {c["symbol"] for c in CoinScanner(api).scan()}
     print(f"    선정 결과: {picked or '없음'}")
     assert "STALE-USDT" not in picked, \
         "일봉 하락 라벨로 숏 진입했다 — 철지난 흐름 차단 실패"
-    print("    ✅ 차단됨")
+    print("    ✅ 차단됨 (예전 구조라면 일봉 라벨을 따라 SHORT 로 들어갔다)")
 
-    saved4 = coin_scanner.REQUIRE_4H_ALIGN
-    savedm = coin_scanner.RECENT_MOVE_MAX_ADVERSE
-    coin_scanner.REQUIRE_4H_ALIGN = False
-    coin_scanner.RECENT_MOVE_MAX_ADVERSE = 9.0     # 사실상 해제
+    # 일봉 거부권을 풀면 통과하는지 — 그 거부권이 원인임을 확인
+    saved = recency.OPPOSE_MAX_1D
+    recency.OPPOSE_MAX_1D = 9.0
     try:
         picked_off = {c["symbol"] for c in CoinScanner(api).scan()}
-        print(f"    필터 해제 시: {picked_off or '없음'}")
-        assert "STALE-USDT" in picked_off, "필터를 껐는데도 안 뽑힘 — 다른 이유로 걸림"
+        print(f"    일봉 거부권 해제 시: {picked_off or '없음'}")
+        assert "STALE-USDT" in picked_off, "해제했는데도 안 뽑힘 — 다른 이유로 걸림"
+        got = [c for c in CoinScanner(api).scan() if c["symbol"] == "STALE-USDT"][0]
+        assert got["trend"] == "UP", \
+            f"방향이 {got['trend']} — 최근 흐름(상승)을 따라야 한다"
+        print(f"    방향 {got['trend']} ({got['dir_src']} 기준) "
+              "← 일봉 라벨(DOWN)이 아니라 최근 흐름을 따른다")
     finally:
-        coin_scanner.REQUIRE_4H_ALIGN = saved4
-        coin_scanner.RECENT_MOVE_MAX_ADVERSE = savedm
-    print("    ✅ 새 필터가 원인임을 확인 (껐더니 통과 = 예전엔 이게 들어갔다)")
+        recency.OPPOSE_MAX_1D = saved
+    print("    ✅ 일봉 거부권이 원인임을 확인")
 
 
 def test_fresh_trend_still_passes():
@@ -303,12 +319,17 @@ def test_fresh_trend_still_passes():
     print("\n[7] 흐름이 살아있으면 통과하는가")
     daily = series(40, 200.0, -3.0, rng=4.0)      # 하락
     h4    = series(20, 100.0, -1.5, rng=1.0)      # 4h 도 하락
-    h1    = series(12, 100.0, -0.3, rng=0.5)      # 1h 도 하락
-    m15   = series(8,  100.0, -0.5, rng=0.4)      # 최근도 하락
+    h1    = series(60, 100.0, -0.3, rng=0.5)      # 1h 도 하락
+    m15   = series(20, 100.0, -0.5, rng=0.4)      # 최근도 하락
     api = StaleAPI(daily, h4, h1, m15)
-    picked = {c["symbol"] for c in CoinScanner(api).scan()}
+    got = CoinScanner(api).scan()
+    picked = {c["symbol"] for c in got}
     print(f"    선정 결과: {picked or '없음'}")
     assert "STALE-USDT" in picked, "전 구간 하락인데 차단됐다 — 너무 엄격"
+    c = got[0]
+    print(f"    방향 {c['trend']}({c['dir_src']}) | 1h ADX {c['adx']:.0f} | "
+          f"신장 {c['fresh_ext']:+.2f}ATR | 나이 {c['fresh_age']}봉")
+    assert c["trend"] == "DOWN"
     print("    ✅ 통과")
 
 

@@ -396,6 +396,35 @@ LOW_VOLUME_DURATION_MIN= 90      # 유지 시간 (분, 1.5시간)
 #   횡보 코인이 가장 위험하다 — 함부로 0 으로 두지 말 것.
 ADX_MIN_THRESHOLD      = 20
 
+# ── 최근 흐름 우선 (Recency Engine) ──────────────────────
+# 기존 구조의 근본 문제:
+#   매매 방향  = 20일 일봉 MA 기울기
+#   보유 시간  = 1~2시간 (MAX_COIN_DURATION_MIN=60)
+#   → 신호의 시간축과 거래의 시간축이 480배 어긋나 있었다.
+#   4h·1h "역행 차단"으로 증상은 막았지만, 방향을 고르는 근거 자체는
+#   여전히 20일 전 데이터였다. "철 지난 흐름으로 들어간다"의 원인.
+#
+# 바뀐 위계:
+#   방향 결정 : 1시간봉 (보조 15분봉)   ← 지금 흐름
+#   거부권    : 4시간봉, 일봉           ← 큰 그림과 정면충돌만 차단
+#   추세 강도(ADX)·일관성도 일봉이 아니라 1시간봉 기준으로 측정
+#   일봉은 변동성(ATR 비율) 판단에만 남는다 — 그건 원래 일 단위 성질이다.
+#
+# 되돌리려면 .env 에 RECENCY_ENABLED=false
+RECENCY_ENABLED = _env_bool("RECENCY_ENABLED", True)
+
+# "지금 이 자리에 들어가도 되는가" 3종 판정
+RECENCY_MAX_EXTENSION_ATR = _env_float("RECENCY_MAX_EXTENSION_ATR", 2.5)
+#   단기 평균에서 트렌드 방향으로 이 배수(ATR) 이상 벌어졌으면 늦은 자리.
+#   물타기는 되돌림으로 회복하는 전략이라 꼭대기 진입이 가장 치명적이다.
+RECENCY_MAX_TREND_AGE = _env_int("RECENCY_MAX_TREND_AGE", 18)
+#   1시간봉 기준 이 봉 수를 넘게 이어진 흐름은 노후로 본다 (18봉 = 18시간).
+RECENCY_MIN_MOMENTUM = _env_float("RECENCY_MIN_MOMENTUM", 0.15)
+#   최근 3봉 이동량 ÷ 직전 3봉 이동량. 이 아래면 식어가는 흐름이다.
+RECENCY_ADX_MIN = _env_float("RECENCY_ADX_MIN", 18.0)
+#   1시간봉 ADX 하한. 일봉 ADX(20)보다 조금 낮게 둔다 — 짧은 시간축은
+#   구조적으로 ADX 가 낮게 나온다.
+
 # 추세 일관성 하한 — 최근 10일봉 중 추세 방향으로 마감한 비율
 # MA 기울기는 "UP" 이라는데 10일 중 4일만 상승 마감했다면 그 추세 라벨은
 # 믿을 게 못 된다. 물타기는 추세가 실제로 이어져야 회복하므로 위험하다.

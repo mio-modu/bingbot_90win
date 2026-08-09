@@ -33,10 +33,14 @@ ENGINE_STATE_FILE = os.path.join(os.path.dirname(__file__), "engine_state.json")
 
 
 # 저널에 남길 코인 선정 지표 — 스캐너가 뽑아준 값 중 판단 근거가 된 것들
-_CTX_KEYS = ("score", "adx", "consistency", "atr_ratio", "recent_vol_1h",
+_CTX_KEYS = ("score", "adx", "adx_d", "consistency", "atr_ratio", "recent_vol_1h",
              "recent_move_15m",
              "change_24h", "momentum_ok", "trend_4h", "trend_1h",
-             "slope_d", "slope_1h", "volume")
+             "slope_d", "slope_1h", "volume",
+             # 최근 흐름 엔진이 판단 근거로 쓴 값들.
+             # 나중에 "어떤 자리에서 들어갔을 때 이겼나"를 되짚으려면
+             # 진입 시점의 이 숫자들이 남아 있어야 한다.
+             "dir_src", "fresh_ext", "fresh_age", "fresh_mom")
 
 
 def _entry_ctx(coin: dict) -> dict:
