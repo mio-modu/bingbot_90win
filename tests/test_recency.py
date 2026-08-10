@@ -207,26 +207,47 @@ BAD  = {"dir_agree": False, "adx": 18, "fresh_ext": 2.2,
         "fresh_mom": 0.3, "consistency": 0.5}
 
 
+OKISH = {"dir_agree": True, "adx": 28, "fresh_ext": 1.0,
+         "fresh_mom": 1.0, "consistency": 0.7}
+
+
 def test_conviction_scales_with_setup_quality():
-    print("\n[14] ★ 좋은 자리는 크게, 애매한 자리는 작게")
+    print("\n[14] ★ 자신 있으면 세게, 애매하면 평범하게")
     g, gw = recency.conviction(GOOD)
+    o, _  = recency.conviction(OKISH)
     b, bw = recency.conviction(BAD)
-    print(f"    좋은 자리 ×{g}  ({', '.join(gw)})")
-    print(f"    애매한 자리 ×{b}  ({', '.join(bw)})")
-    assert g > 1.1, f"확신 있는 자리인데 가산이 없다: {g}"
-    assert b < 0.9, f"애매한 자리인데 축소가 없다: {b}"
-    assert g > b
-    print("    ✅")
+    n, _  = recency.conviction({})
+    print(f"    확신 ×{g}  ({', '.join(gw)})")
+    print(f"    보통 ×{o}")
+    print(f"    애매 ×{b}  ({', '.join(bw)})")
+    print(f"    지표없음 ×{n}")
+    assert g > 1.4, f"확신 있는 자리인데 충분히 안 키운다: {g}"
+    assert 1.0 < o < g, f"보통 자리가 확신 자리와 구분돼야 한다: {o} vs {g}"
+    assert 0.8 <= b < 1.0, f"애매한 자리는 '평범하게'여야 한다 (과하게 깎지 말 것): {b}"
+    assert n == 1.0, "지표가 없으면 중립이어야 한다"
+    print("    ✅ 단계적으로 벌어진다")
 
 
-def test_conviction_stays_in_bounds():
-    print("\n[15] 확신도 배율은 범위를 벗어나지 않는다")
-    extreme_good = dict(GOOD, adx=99, fresh_ext=-5, fresh_mom=99, consistency=1.0)
-    extreme_bad  = dict(BAD,  adx=0,  fresh_ext=99, fresh_mom=-99, consistency=0.0)
-    hi, _ = recency.conviction(extreme_good, 0.6, 1.35)
-    lo, _ = recency.conviction(extreme_bad,  0.6, 1.35)
-    print(f"    최대 ×{hi} / 최소 ×{lo}")
-    assert hi == 1.35 and lo == 0.6
+def test_conviction_top_requires_everything():
+    """조건 몇 개만 맞아도 상한에 닿으면 '괜찮음'과 '최상'이 같아진다"""
+    print("\n[15] 상한은 모든 지표가 최상일 때만")
+    near_top = {"dir_agree": True, "adx": 45, "fresh_ext": 0.1,
+                "fresh_mom": 2.0, "consistency": 0.90}
+    perfect  = {"dir_agree": True, "adx": 99, "fresh_ext": -5,
+                "fresh_mom": 99, "consistency": 1.0}
+    worst    = {"dir_agree": False, "adx": 0, "fresh_ext": 99,
+                "fresh_mom": -99, "consistency": 0.0}
+    n, _ = recency.conviction(near_top)
+    p, _ = recency.conviction(perfect)
+    w, _ = recency.conviction(worst)
+    print(f"    거의 최상 ×{n} / 이론상 최대 ×{p} / 최악 ×{w}")
+    assert recency.conviction(GOOD)[0] < recency.conviction(near_top)[0], \
+        "좋은 자리와 아주 좋은 자리가 구분되지 않는다"
+    assert p == 1.80, f"상한을 넘거나 못 닿는다: {p}"
+    # 최악이어도 0.85 밑으로는 안 간다. 0.85 에 정확히 닿지는 않는데,
+    # 1h 방향이 잡혀 있다는 사실 자체(agree=False 여도 0.35점)는
+    # 0 점이 아니기 때문이다 — 어차피 모든 필터를 통과한 후보다.
+    assert 0.85 <= w < 0.90, f"하한 근처여야 한다: {w}"
     print("    ✅")
 
 
@@ -274,7 +295,7 @@ def main():
              test_fresh_trend_gets_bonus,
              test_momentum_ratio_flat_denominator,
              test_conviction_scales_with_setup_quality,
-             test_conviction_stays_in_bounds,
+             test_conviction_top_requires_everything,
              test_conviction_handles_missing_fields,
              test_short_data_is_safe]
     assert len(order) == len(fns), "테스트 목록 누락"

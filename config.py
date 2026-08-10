@@ -241,9 +241,16 @@ POSITION_SYNC_MIN_DIFF_RATIO = _env_float("POSITION_SYNC_MIN_DIFF_RATIO", 0.10)
 #   수량 차이가 이 비율을 넘으면 개입으로 본다. 부분 체결·반올림 오차는
 #   보통 1% 미만이라 10% 면 넉넉하다.
 
+#
+# 배율 설계: "자신 있으면 세게, 애매하면 평범하게"
+#   품질 0.0 → 0.85  (애매해도 거의 평범하게. 어차피 모든 필터를 통과한
+#                     후보다. 과하게 줄이면 이길 때 못 번다)
+#   품질 0.5 → 1.00  (기본 시드)
+#   품질 1.0 → 1.80  (ADX·일치·신장도·모멘텀·일관성이 모두 최상일 때만)
+# 품질 점수는 recency.conviction() 참조 — 지표를 0~1 로 정규화한 가중 평균.
 CONVICTION_SIZING_ENABLED = _env_bool("CONVICTION_SIZING_ENABLED", True)
-CONVICTION_MIN_MULT = _env_float("CONVICTION_MIN_MULT", 0.60)   # 애매한 자리
-CONVICTION_MAX_MULT = _env_float("CONVICTION_MAX_MULT", 1.35)   # 확신 있는 자리
+CONVICTION_MIN_MULT = _env_float("CONVICTION_MIN_MULT", 0.85)   # 애매한 자리
+CONVICTION_MAX_MULT = _env_float("CONVICTION_MAX_MULT", 1.80)   # 확신 있는 자리
 
 # 4단계 DCA 손실 기반 트리거 — 비활성화 (3→4단계 신중하게: 가격트리거·횡보DCA만 허용)
 DCA_STEP4_NET_LOSS_TRIGGER = -9999.0  # 비활성화 (손실만으로 4단계 즉시 투입 금지)

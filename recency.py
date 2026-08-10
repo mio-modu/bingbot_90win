@@ -251,28 +251,53 @@ def momentum_ratio(closes: list, trend: str, half: int = 3) -> float:
 # ────────────────────────────────────────────────────────────
 #  확신도 — 자리가 좋으면 크게, 애매하면 작게
 # ────────────────────────────────────────────────────────────
-def conviction(coin: dict, lo: float = 0.6, hi: float = 1.35) -> tuple:
+# 확신도 구성요소와 가중치. 합이 1.0 이어야 한다.
+_CONV_WEIGHTS = {
+    "adx":   0.25,   # 추세가 실제로 있는가 — 물타기 전략의 생명줄
+    "agree": 0.20,   # 15m·1h 가 같은 방향인가
+    "ext":   0.20,   # 아직 안 벌어졌는가 (들어갈 자리가 남았는가)
+    "mom":   0.20,   # 지금 우리 방향으로 가속 중인가
+    "cons":  0.15,   # 최근 봉들이 한 방향으로 마감했는가
+}
+_CONV_NEUTRAL = 0.5   # 이 품질이면 배율 1.0 (= 기본 시드 그대로)
+
+
+def _clamp01(x: float) -> float:
+    return 0.0 if x < 0 else (1.0 if x > 1 else x)
+
+
+def conviction(coin: dict, lo: float = 0.85, hi: float = 1.80) -> tuple:
     """
-    스캐너가 뽑아준 지표만 보고 시드 배율을 정한다.
+    스캐너 지표만 보고 시드 배율을 정한다.
 
-    왜 이게 "공격적"인가
-    --------------------
-    지금까지는 자리가 좋든 나쁘든 시드가 같았다. 그래서 확신 있는
-    자리에서도 조금만 먹고, 애매한 자리에서도 똑같이 크게 잃었다.
-    실측 데이터가 그 결과를 보여준다 — 승률 88% 에 손익 -$277.
+    설계 원칙 — "자신 있으면 세게, 애매하면 평범하게"
+    ------------------------------------------------
+    처음에는 좋은 자리에 +20%, 나쁜 자리에 -20% 씩 더하고 빼는 방식이었다.
+    두 가지가 문제였다.
 
-    진입 횟수를 늘리는 건 그 패턴을 키울 뿐이다. 대신 **좋은 자리에
-    더 싣는다.** 시드가 커지면 max_position(=자본 한도)에 더 빨리
-    닿으므로 물타기 사다리는 자연히 얕아진다. 이것도 유리한 방향이다.
-    손실이 커지는 건 언제나 고단계 물타기였다.
+      · 애매한 자리를 0.6 배까지 깎았다. 애매하다고 해서 질 거라는 뜻은
+        아니다. 어차피 모든 필터를 통과해 올라온 후보다. 과하게 줄이면
+        이길 때 못 번다.
+      · 조건 몇 개만 맞으면 곧바로 상한에 닿았다. "괜찮은 자리"와
+        "아주 좋은 자리"가 같은 대접을 받았다.
+
+    그래서 각 지표를 0~1 로 정규화해 가중 평균(품질 점수)을 내고,
+    그 점수를 배율로 매끄럽게 옮긴다.
+
+        품질 0.0  →  lo   (0.85 — 애매해도 거의 평범하게)
+        품질 0.5  →  1.0  (기본 시드)
+        품질 1.0  →  hi   (1.80 — 모든 지표가 최상일 때만)
+
+    지표가 없으면 그 항목은 중립(0.5)으로 둔다. 없는 근거로 베팅하지도,
+    벌하지도 않는다.
+
+    시드가 커지면 max_position(=보유 자본)에 더 빨리 닿아 물타기 사다리가
+    자연히 얕아진다. 이건 부작용이 아니라 의도다 — 손실이 커진 경우는
+    언제나 고단계 물타기였다.
 
     반환: (배율, 사유 목록)
     """
-    m = 1.0
-    why = []
-
     def num(key):
-        """값이 없거나 숫자가 아니면 None. 없는 근거로 시드를 키우지 않는다."""
         v = coin.get(key)
         if v is None:
             return None
@@ -281,36 +306,56 @@ def conviction(coin: dict, lo: float = 0.6, hi: float = 1.35) -> tuple:
         except (TypeError, ValueError):
             return None
 
-    if coin.get("dir_agree"):
-        m += 0.20; why.append("15m·1h 일치 +20%")
+    parts, why = {}, []
 
+    # ── ADX: 15 → 0.0 / 40 이상 → 1.0 ──────────────────
     adx = num("adx")
-    if adx is not None:
-        if adx >= 30:
-            m += 0.20; why.append(f"ADX {adx:.0f} +20%")
-        elif adx < 20:
-            m -= 0.10; why.append(f"ADX {adx:.0f} -10%")
+    if adx is None:
+        parts["adx"] = 0.5
+    else:
+        parts["adx"] = _clamp01((adx - 15.0) / 25.0)
+        why.append(f"ADX {adx:.0f}")
 
-    # 신장도가 작다 = 평균 근처 = 되돌림 여유가 남아 있다
+    # ── 근거리 방향 일치 ────────────────────────────────
+    if "dir_agree" in coin:
+        parts["agree"] = 1.0 if coin.get("dir_agree") else 0.35
+        why.append("15m·1h 일치" if coin.get("dir_agree") else "1h 단독")
+    else:
+        parts["agree"] = 0.5
+
+    # ── 신장도: 0 ATR → 1.0 / 2.5 ATR 이상 → 0.0 ────────
     ext = num("fresh_ext")
-    if ext is not None:
-        if ext <= 0.5:
-            m += 0.15; why.append(f"평균 근처 {ext:+.1f}ATR +15%")
-        elif ext >= 1.8:
-            m -= 0.20; why.append(f"이미 벌어짐 {ext:+.1f}ATR -20%")
+    if ext is None:
+        parts["ext"] = 0.5
+    else:
+        parts["ext"] = _clamp01((2.5 - ext) / 2.5)
+        why.append(f"신장 {ext:+.1f}ATR")
 
+    # ── 모멘텀: 0 → 0.0 / 2.0(반전) → 1.0 ───────────────
     mom = num("fresh_mom")
-    if mom is not None:
-        if mom >= 1.5:
-            m += 0.15; why.append(f"가속 {mom:.1f} +15%")
-        elif mom < 0.5:
-            m -= 0.15; why.append(f"둔화 {mom:.1f} -15%")
+    if mom is None:
+        parts["mom"] = 0.5
+    else:
+        parts["mom"] = _clamp01(mom / 2.0)
+        why.append(f"모멘텀 {mom:.1f}")
 
+    # ── 일관성: 50% → 0.0 / 90% 이상 → 1.0 ──────────────
     cons = num("consistency")
-    if cons is not None and cons >= 0.7:
-        m += 0.10; why.append(f"일관성 {cons:.0%} +10%")
+    if cons is None:
+        parts["cons"] = 0.5
+    else:
+        parts["cons"] = _clamp01((cons - 0.5) / 0.4)
+        why.append(f"일관성 {cons:.0%}")
+
+    quality = sum(parts[k] * w for k, w in _CONV_WEIGHTS.items())
+
+    if quality >= _CONV_NEUTRAL:
+        m = 1.0 + (quality - _CONV_NEUTRAL) / (1.0 - _CONV_NEUTRAL) * (hi - 1.0)
+    else:
+        m = lo + (quality / _CONV_NEUTRAL) * (1.0 - lo)
 
     m = max(lo, min(hi, m))
+    why.insert(0, f"품질 {quality:.2f}")
     return round(m, 3), why
 
 
