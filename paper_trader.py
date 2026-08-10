@@ -538,20 +538,30 @@ class PaperTrader:
             self._adopt_external_size(live)
             return False
 
-        # 체결가 추정: 백스톱이 걸려 있었다면 그 가격에서 나갔을 가능성이 높다
-        est_price = p.stop_price if p.stop_price > 0 else 0.0
-        if est_price <= 0:
-            try:
-                est_price = self.live_api.get_price(p.symbol)
-            except Exception:
-                est_price = p.avg_price
+        # ── 체결가: 먼저 **거래소에 실제로 물어본다** ──────────
+        # 봇이 꺼져 있는 사이(폰 배터리 방전·앱 종료 등) 백스톱이 체결되는
+        # 상황이 실제로 일어난다. 그때 추정가로 장부를 닫으면 오차가 그대로
+        # 남는다. 백스톱 주문 ID 를 들고 있으므로 실제 체결가를 알 수 있다.
+        real_price = self._actual_fill_price(p.symbol, p.stop_order_id)
+        if real_price > 0:
+            fill = real_price
+            how  = "거래소청산감지(백스톱체결가확인)"
+            note = f"실제 체결가 {fill:.8f} (백스톱 주문 조회)"
+        else:
+            fill = p.stop_price if p.stop_price > 0 else 0.0
+            if fill <= 0:
+                try:
+                    fill = self.live_api.get_price(p.symbol)
+                except Exception:
+                    fill = p.avg_price
+            how  = "거래소청산감지(백스톱추정)"
+            note = (f"추정 체결가 {fill:.8f} "
+                    f"(실제 체결가와 다를 수 있으니 거래소 내역과 대조할 것)")
         logger.critical(
             f"[정합성⚠] {p.symbol} {pos_side} — 봇은 보유 중이나 거래소에 포지션 없음. "
-            f"거래소 강제 손절(백스톱) 체결로 추정 → 장부를 닫는다. "
-            f"추정 체결가 {est_price:.8f} "
-            f"(실제 체결가와 다를 수 있으니 거래소 내역과 대조할 것)"
+            f"봇이 없는 사이 청산된 것으로 보인다 → 장부를 닫는다. {note}"
         )
-        self.close_position(est_price, "거래소청산감지(백스톱추정)")
+        self.close_position(fill, how)
         return True
 
     def _adopt_external_size(self, live: dict) -> bool:

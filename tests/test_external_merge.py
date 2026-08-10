@@ -241,6 +241,55 @@ def test_position_gone_still_closes_book():
         config.LIVE_TRADING = prev
 
 
+def test_offline_backstop_fill_is_queried():
+    """★ 봇이 꺼져 있는 사이(폰 배터리 방전 등) 백스톱이 체결된 경우
+
+    다시 켜면 거래소에는 포지션이 없다. 그때 '걸어둔 손절 가격'으로
+    추정해 장부를 닫으면 오차가 그대로 남는다. 백스톱 주문 ID 를 들고
+    있으므로 **실제 체결가**를 물어볼 수 있다.
+    """
+    print("\n[7b] ★ 봇이 없는 사이 백스톱이 체결됐을 때 실제 체결가 조회")
+    api, pt, prev = setup("offline")
+    try:
+        p = pt.position
+        p.stop_order_id = "STOP-9"
+        p.stop_price    = p.avg_price * 0.92     # 걸어둔 손절 가격
+        api.fill_price  = p.avg_price * 0.90     # 실제로는 더 아래에서 체결
+        api.qty = 0.0                            # 봇이 꺼진 사이 청산됨
+
+        pt.reconcile_with_exchange()
+        rec = pt.closed_trades[-1]
+        print(f"    걸어둔 손절 {p.stop_price:.8f} / "
+              f"실제 체결 {api.fill_price:.8f}")
+        print(f"    기록 {rec['exit_price']:.8f} | 사유 {rec['reason']}")
+        assert abs(rec["exit_price"] - api.fill_price) < 1e-6, \
+            "걸어둔 가격으로 기록했다 — 슬리피지만큼 장부가 낙관적이 된다"
+        assert "체결가확인" in rec["reason"]
+        print("    ✅ 실제 체결가로 기록")
+    finally:
+        config.LIVE_TRADING = prev
+
+
+def test_offline_backstop_falls_back_when_query_fails():
+    print("\n[7c] 백스톱 체결가 조회가 안 되면 걸어둔 가격으로 닫는다")
+    api, pt, prev = setup("offline2")
+    try:
+        p = pt.position
+        p.stop_order_id = "STOP-9"
+        p.stop_price    = p.avg_price * 0.92
+        api.fill_price  = 0.0                    # 조회 실패
+        api.qty = 0.0
+
+        pt.reconcile_with_exchange()
+        rec = pt.closed_trades[-1]
+        print(f"    기록 {rec['exit_price']:.8f} | 사유 {rec['reason']}")
+        assert "추정" in rec["reason"]
+        assert pt.position is None, "장부를 못 닫으면 신규 진입이 영영 막힌다"
+        print("    ✅ 추정으로 닫되 장부는 반드시 닫는다")
+    finally:
+        config.LIVE_TRADING = prev
+
+
 def test_trail_is_reset_when_average_changes():
     """★ 실제 사고 재현 — 평단이 바뀌자 트레일이 즉시 발동해 전량 청산됐다
 
@@ -330,6 +379,8 @@ def main():
                test_small_difference_is_ignored,
                test_survives_restart,
                test_position_gone_still_closes_book,
+               test_offline_backstop_fill_is_queried,
+               test_offline_backstop_falls_back_when_query_fails,
                test_trail_is_reset_when_average_changes,
                test_uses_actual_fill_price,
                test_falls_back_to_estimate_when_query_fails]:
