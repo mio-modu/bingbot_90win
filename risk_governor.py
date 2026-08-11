@@ -123,8 +123,9 @@ class RiskGovernor:
             self.day_peak_equity = new_day_peak
             self._save()
 
-    def reset_baseline(self, equity: float, why: str = ""):
-        """기준선을 지금 자본으로 다시 잡는다.
+    def reset_baseline(self, equity: float, old_equity: float = 0.0,
+                       why: str = ""):
+        """기준선을 옮긴다.
 
         ⚠ **매매 손익이 아닌 이유로 자본이 바뀌었을 때만** 부른다.
           입금·출금·계좌 변경이 그렇다.
@@ -137,8 +138,22 @@ class RiskGovernor:
         잃은 게 아니라 계좌가 바뀐 것인데도.
         게다가 $500 이 $1,050 으로 돌아갈 일이 없으니 **영구 정지**였다.
 
-        낙폭 기준선이 실제 자본과 무관해지면 거버너는 안전장치가 아니라
-        고장난 브레이크가 된다.
+        어떻게 옮기는가 — 그냥 리셋하면 안 된다
+        --------------------------------------
+        고점을 무조건 '지금 자본'으로 덮어쓰면 반대 사고가 난다.
+
+            봇이 $1,500 까지 갔다가 $1,200 으로 밀렸다 (진짜 낙폭 20%)
+            → 사람이 $100 입금 → 자본 $1,300
+            → 고점을 $1,300 으로 리셋하면 낙폭 기록이 통째로 사라진다.
+              방금까지 20% 밀리던 상황이 "고점 = 지금" 이 되어
+              브레이크가 풀린다.
+
+        그래서 **변동분만큼 평행이동**한다.
+            새 고점 = 옛 고점 + (새 자본 − 옛 자본)
+        위 예시라면 고점 $1,600, 낙폭 18.75% — 관계가 보존된다.
+        계좌 변경($1,050→$500)도 같은 식으로 고점 $500 이 나온다.
+
+        옛 자본을 모르면 어쩔 수 없이 지금 자본으로 잡는다.
 
         연속손실 카운터는 건드리지 않는다 — 그건 매매 결과이고,
         계좌를 옮겼다고 최근 매매가 좋아진 건 아니다.
@@ -146,20 +161,37 @@ class RiskGovernor:
         if equity <= 0:
             return
         old_peak = self.peak_equity
-        self.peak_equity      = equity
-        self.day_start_equity = equity
-        self.day_peak_equity  = equity
-        self.day_key          = datetime.now(KST).strftime("%Y-%m-%d")
-        # 잘못된 낙폭으로 걸린 중지는 함께 푼다.
+
+        if old_equity > 0 and self.peak_equity > 0:
+            delta = equity - old_equity
+            self.peak_equity      = max(equity, self.peak_equity + delta)
+            self.day_start_equity = max(0.0, self.day_start_equity + delta) \
+                                    if self.day_start_equity > 0 else equity
+            self.day_peak_equity  = max(equity, self.day_peak_equity + delta) \
+                                    if self.day_peak_equity > 0 else equity
+            mode = f"평행이동 ({delta:+,.2f})"
+        else:
+            self.peak_equity      = equity
+            self.day_start_equity = equity
+            self.day_peak_equity  = equity
+            mode = "지금 자본으로 재설정"
+
+        self.day_key = datetime.now(KST).strftime("%Y-%m-%d")
+        # 옛 기준으로 걸려 있던 중지는 푼다. 옮긴 기준으로도 여전히 위험하면
+        # 다음 틱의 seed_multiplier 가 알아서 다시 중지시킨다.
         if self.halt_until > time.time():
-            logger.info(f"[거버너] 기준선 재설정 → 기존 매매중지 해제 "
+            logger.info(f"[거버너] 기준선 이동 → 기존 매매중지 해제 "
                         f"({self.halt_reason})")
         self.halt_until  = 0.0
         self.halt_reason = ""
+
+        dd = ((self.peak_equity - equity) / self.peak_equity
+              if self.peak_equity > 0 else 0.0)
         logger.warning(
-            f"[거버너] 기준선 재설정: 고점 ${old_peak:,.2f} → ${equity:,.2f}"
+            f"[거버너] 기준선 {mode}: 고점 ${old_peak:,.2f} → "
+            f"${self.peak_equity:,.2f} | 현재 ${equity:,.2f} (낙폭 {dd:.1%})"
             + (f" | {why}" if why else "")
-            + " (입출금·계좌변경은 손실이 아니다)"
+            + " — 입출금·계좌변경은 손실이 아니다"
         )
         self._save()
 

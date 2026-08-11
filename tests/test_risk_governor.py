@@ -241,6 +241,46 @@ def test_account_switch_is_not_a_drawdown():
     print("    ✅ 입출금·계좌변경은 손실로 치지 않는다")
 
 
+def test_deposit_does_not_erase_a_real_drawdown():
+    """★ 입금이 낙폭 기록을 지워버리면 브레이크가 풀린다
+
+    봇이 $1,500 → $1,200 으로 밀린 상태(진짜 낙폭 20%)에서 $100 을
+    입금하면, 고점을 '지금 자본'으로 리셋하는 방식은 낙폭을 0% 로
+    만들어 버린다. 방금까지 위험했던 상황이 통째로 사라진다.
+    """
+    print("\n[6d] ★ 입금이 진짜 낙폭을 지우지 않는가")
+    g = fresh("deposit")
+    g.update_equity(1500.0)
+    g.day_start_equity = g.day_peak_equity = 1500.0
+    dd_before = (g.peak_equity - 1200.0) / g.peak_equity
+    print(f"    입금 전: 고점 ${g.peak_equity:,.0f} / 자본 $1,200 "
+          f"→ 낙폭 {dd_before:.1%}")
+
+    # $100 입금 → 자본 $1,300
+    g.reset_baseline(1300.0, old_equity=1200.0, why="입금 $100")
+    dd_after = (g.peak_equity - 1300.0) / g.peak_equity
+    print(f"    입금 후: 고점 ${g.peak_equity:,.0f} / 자본 $1,300 "
+          f"→ 낙폭 {dd_after:.1%}")
+
+    assert g.peak_equity == 1600.0, f"고점을 평행이동해야 한다: {g.peak_equity}"
+    assert dd_after > 0.15, "입금으로 낙폭이 사라졌다 — 브레이크가 풀린다"
+    assert g.day_start_equity == 1600.0
+    print("    ✅ 낙폭 관계 보존 (20% → 18.8%)")
+
+
+def test_account_switch_still_works_with_delta():
+    """계좌 변경도 같은 평행이동으로 처리된다"""
+    print("\n[6e] 계좌 변경($1,050 → $500)도 평행이동으로 맞는가")
+    g = fresh("switch")
+    g.update_equity(1050.0)
+    g.reset_baseline(500.0, old_equity=1050.0, why="서브계좌 전환")
+    print(f"    고점 ${g.peak_equity:,.0f} / 자본 $500 "
+          f"→ 낙폭 {(g.peak_equity-500)/g.peak_equity:.1%}")
+    assert g.peak_equity == 500.0, "계좌를 옮겼는데 낙폭이 남아 있다"
+    assert g.can_enter(500.0)[0] is True
+    print("    ✅")
+
+
 def test_reset_baseline_keeps_trade_history():
     """계좌를 옮겼다고 최근 매매 성적이 좋아지는 건 아니다"""
     print("\n[6c] 기준선 재설정이 연속손실 기록까지 지우지는 않는다")
@@ -278,6 +318,8 @@ def main():
                test_open_position_untouched, test_no_deadlock,
                test_persistence,
                test_account_switch_is_not_a_drawdown,
+               test_deposit_does_not_erase_a_real_drawdown,
+               test_account_switch_still_works_with_delta,
                test_reset_baseline_keeps_trade_history,
                test_disabled]:
         fn()

@@ -718,6 +718,7 @@ class PaperTrader:
             try:
                 self.governor.reset_baseline(
                     self.total_capital + self.total_pnl,
+                    old_equity=book,     # 동기화 직전의 장부 자본
                     why=f"자본동기화 ${old:,.0f} → ${self.total_capital:,.0f}")
             except Exception as e:
                 logger.warning(f"[거버너] 기준선 재설정 실패(무시): {e}")
