@@ -265,6 +265,30 @@ def test_conviction_handles_missing_fields():
     print("    ✅ 전부 중립(1.0)")
 
 
+def test_counter_trend_is_flagged():
+    """★ 되돌림 진입은 물타기 전략에 구조적으로 불리하다 — 표시해야 한다"""
+    print("\n[17] ★ 역추세(되돌림) 진입 표시")
+    # 일봉은 완만한 상승인데 최근 흐름은 하락 → 되돌림 숏
+    v = recency.decide_direction(
+        closes_15m=line(100, -0.20, 20),
+        closes_1h=line(100, -0.50, 40),
+        closes_4h=line(100, -1.0, 20),
+        closes_1d=line(100, 0.5, 30))
+    print(f"    {v['trend']} / 역추세 {v['counter_trend']} / {v['reason']}")
+    assert v["trend"] == "DOWN"
+    assert v["counter_trend"] is True, "일봉 상승에 숏인데 역추세로 안 잡혔다"
+
+    # 전 구간 같은 방향이면 역추세가 아니다
+    v2 = recency.decide_direction(
+        closes_15m=line(100, -0.20, 20),
+        closes_1h=line(100, -0.50, 40),
+        closes_4h=line(100, -1.0, 20),
+        closes_1d=line(100, -0.5, 30))
+    print(f"    전 구간 하락 → 역추세 {v2['counter_trend']}")
+    assert v2["counter_trend"] is False
+    print("    ✅")
+
+
 def test_short_data_is_safe():
     print("\n[13] 데이터가 모자라도 터지지 않는다")
     assert recency.slope([], 6) == 0.0
@@ -297,6 +321,7 @@ def main():
              test_conviction_scales_with_setup_quality,
              test_conviction_top_requires_everything,
              test_conviction_handles_missing_fields,
+             test_counter_trend_is_flagged,
              test_short_data_is_safe]
     assert len(order) == len(fns), "테스트 목록 누락"
     for fn in order:

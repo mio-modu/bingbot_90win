@@ -477,6 +477,25 @@ RECENCY_MAX_TREND_AGE = _env_int("RECENCY_MAX_TREND_AGE", 18)
 RECENCY_MIN_MOMENTUM = _env_float("RECENCY_MIN_MOMENTUM", 0.15)
 #   최근 3봉 이동량 ÷ 직전 3봉 이동량. 이 아래면 식어가는 흐름이다.
 RECENCY_ADX_MIN = _env_float("RECENCY_ADX_MIN", 18.0)
+
+# ── 역추세(되돌림) 진입 ──────────────────────────────────
+# 큰 축(4h·일봉)이 반대인데 최근 흐름만 돌아선 자리.
+# 물타기 전략에서는 이게 일반 거래와 성질이 다르다.
+#
+#   추세 방향 진입 : 물탄 물량은 추세가 이어지면 회복된다
+#   역추세 진입    : 물탄 물량이 큰 흐름과 싸운다.
+#                    되돌림이 끝나는 순간 단계마다 더 깊이 물린다.
+#
+# 그래서 금지하지는 않되 (되돌림 구간은 실제로 잘 움직인다)
+# 근거를 더 요구하고 크기를 줄인다.
+COUNTER_TREND_ALLOWED       = _env_bool("COUNTER_TREND_ALLOWED", True)
+COUNTER_TREND_REQUIRE_AGREE = _env_bool("COUNTER_TREND_REQUIRE_AGREE", True)
+#   역추세는 15m·1h 가 **둘 다** 같은 방향일 때만. 한쪽만 돌아선 건
+#   되돌림의 시작인지 노이즈인지 구분이 안 된다.
+COUNTER_TREND_ADX_MIN  = _env_float("COUNTER_TREND_ADX_MIN", 25.0)
+#   역추세는 1h ADX 하한을 더 높게 (일반 18 → 역추세 25).
+COUNTER_TREND_SIZE_MULT = _env_float("COUNTER_TREND_SIZE_MULT", 0.70)
+#   그래도 들어간다면 시드를 30% 줄인다.
 #   1시간봉 ADX 하한. 일봉 ADX(20)보다 조금 낮게 둔다 — 짧은 시간축은
 #   구조적으로 ADX 가 낮게 나온다.
 

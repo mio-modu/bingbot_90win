@@ -106,7 +106,8 @@ def decide_direction(closes_15m: list, closes_1h: list,
 
     out = {"s15": s15, "s1h": s1h, "s4h": s4h, "s1d": s1d,
            "d15": d15, "d1h": d1h, "d4h": d4h, "d1d": d1d,
-           "trend": None, "src": None, "agree": False, "reason": ""}
+           "trend": None, "src": None, "agree": False,
+           "counter_trend": False, "reason": ""}
 
     # ── 방향은 근거리에서 나온다 ────────────────────────
     if d1h != "SIDEWAYS" and d15 != "SIDEWAYS":
@@ -139,8 +140,23 @@ def decide_direction(closes_15m: list, closes_1h: list,
         out["reason"] = f"일봉 강한 역행 ({s1d:+.3%})"
         return out
 
-    out.update(trend=trend, src=src, agree=agree,
-               reason=f"{src} 기준 {trend}" + (" (15m·1h 일치)" if agree else ""))
+    # ── 역추세인가 ──────────────────────────────────────
+    # 큰 축(4h·일봉)이 반대 방향이면 "되돌림을 잡는" 거래다.
+    # 물타기 전략에서 이건 일반 거래와 성질이 다르다.
+    #
+    #   추세 방향 진입 : 물탄 물량은 추세가 이어지면 회복된다
+    #   역추세 진입    : 물탄 물량은 큰 흐름과 싸운다.
+    #                    되돌림이 끝나면 단계마다 더 깊이 물린다.
+    #
+    # 금지하지는 않는다 — 되돌림 구간은 실제로 잘 움직인다.
+    # 다만 **근거를 더 요구하고 크기를 줄인다.**
+    counter = (_sign(d1d) == -sg and d1d != "SIDEWAYS") or \
+              (_sign(d4h) == -sg and d4h != "SIDEWAYS")
+
+    out.update(trend=trend, src=src, agree=agree, counter_trend=counter,
+               reason=f"{src} 기준 {trend}"
+                      + (" (15m·1h 일치)" if agree else "")
+                      + (" [역추세]" if counter else ""))
     return out
 
 

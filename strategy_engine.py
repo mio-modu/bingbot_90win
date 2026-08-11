@@ -41,7 +41,8 @@ _CTX_KEYS = ("score", "adx", "adx_d", "consistency", "atr_ratio", "recent_vol_1h
              # 최근 흐름 엔진이 판단 근거로 쓴 값들.
              # 나중에 "어떤 자리에서 들어갔을 때 이겼나"를 되짚으려면
              # 진입 시점의 이 숫자들이 남아 있어야 한다.
-             "dir_src", "fresh_ext", "fresh_age", "fresh_mom")
+             "dir_src", "fresh_ext", "fresh_age", "fresh_mom",
+             "counter_trend")
 
 
 def _entry_ctx(coin: dict) -> dict:
@@ -647,6 +648,10 @@ class StrategyEngine:
             if gov_mult < 1.0 and conv_mult > 1.0:
                 conv_why.append(f"거버너 축소 중({gov_mult:.2f}) → 가산 취소")
                 conv_mult = 1.0
+            # 역추세(되돌림) 진입은 물타기 회복이 큰 흐름과 싸운다 → 더 작게
+            if coin.get("counter_trend"):
+                conv_mult *= config.COUNTER_TREND_SIZE_MULT
+                conv_why.append(f"역추세 ×{config.COUNTER_TREND_SIZE_MULT}")
             invest = max(config.DYNAMIC_SEED_MIN_USD, base_seed * conv_mult)
             logger.info(
                 f"[확신도] {symbol} 배율 {conv_mult:.2f} → 시드 "

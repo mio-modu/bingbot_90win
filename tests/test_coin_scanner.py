@@ -298,12 +298,16 @@ def test_stale_trend_blocked():
         "일봉 하락 라벨로 숏 진입했다 — 철지난 흐름 차단 실패"
     print("    ✅ 차단됨 (예전 구조라면 일봉 라벨을 따라 SHORT 로 들어갔다)")
 
-    # 일봉 거부권을 풀면 통과하는지 — 그 거부권이 원인임을 확인
+    # 큰 축의 반대를 전부 풀면 통과하는지 — 그게 원인임을 확인.
+    # 일봉 거부권과 역추세 게이트 두 가지가 함께 막고 있다.
+    # (이 캔들은 1h 가 SIDEWAYS 라 15m 단독 진입 → 역추세 조건 미달)
     saved = recency.OPPOSE_MAX_1D
+    saved_agree = coin_scanner.COUNTER_TREND_REQUIRE_AGREE
     recency.OPPOSE_MAX_1D = 9.0
+    coin_scanner.COUNTER_TREND_REQUIRE_AGREE = False
     try:
         picked_off = {c["symbol"] for c in CoinScanner(api).scan()}
-        print(f"    일봉 거부권 해제 시: {picked_off or '없음'}")
+        print(f"    큰 축 게이트 해제 시: {picked_off or '없음'}")
         assert "STALE-USDT" in picked_off, "해제했는데도 안 뽑힘 — 다른 이유로 걸림"
         got = [c for c in CoinScanner(api).scan() if c["symbol"] == "STALE-USDT"][0]
         assert got["trend"] == "UP", \
@@ -312,7 +316,8 @@ def test_stale_trend_blocked():
               "← 일봉 라벨(DOWN)이 아니라 최근 흐름을 따른다")
     finally:
         recency.OPPOSE_MAX_1D = saved
-    print("    ✅ 일봉 거부권이 원인임을 확인")
+        coin_scanner.COUNTER_TREND_REQUIRE_AGREE = saved_agree
+    print("    ✅ 큰 축 반대(일봉 거부권 + 역추세 게이트)가 원인임을 확인")
 
 
 def test_fresh_trend_still_passes():

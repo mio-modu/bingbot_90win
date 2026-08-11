@@ -43,7 +43,9 @@ from config import (MIN_VOLUME_USDT, MAX_VOLUME_USDT, TOP_N_COINS, MA_PERIOD,
                     ADX_MIN_THRESHOLD, CONSISTENCY_MIN,
                     RECENCY_ENABLED, RECENCY_MAX_EXTENSION_ATR,
                     RECENCY_MAX_TREND_AGE, RECENCY_MIN_MOMENTUM,
-                    RECENCY_ADX_MIN)
+                    RECENCY_ADX_MIN,
+                    COUNTER_TREND_ALLOWED, COUNTER_TREND_REQUIRE_AGREE,
+                    COUNTER_TREND_ADX_MIN)
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +252,9 @@ class CoinScanner:
             "최근흐름없음": 0,   # 15m·1h 가 횡보거나 서로 충돌 / 큰 축이 거부
             "과신장": 0,        # 단기 평균에서 너무 벌어짐 = 늦은 자리
             "모멘텀감쇠": 0,     # 식어가는 흐름 (나이는 차단 안 함 — 점수만 조정)
+            "역추세": 0,          # 되돌림 진입 자체를 막아둔 경우
+            "역추세근거부족": 0,   # 역추세인데 15m·1h 가 일치하지 않음
+            "역추세ADX부족": 0,
         }
 
         for t in tickers:
@@ -352,6 +357,19 @@ class CoinScanner:
                         continue
                     dir_src   = verdict["src"]
                     dir_agree = verdict["agree"]
+                    counter   = verdict["counter_trend"]
+
+                    # 역추세(되돌림)는 물타기 전략에 구조적으로 불리하다.
+                    # 물탄 물량이 큰 흐름과 싸우게 되기 때문이다.
+                    # 금지하지는 않되 근거를 더 요구한다.
+                    if counter:
+                        if not COUNTER_TREND_ALLOWED:
+                            _f["역추세"] += 1
+                            continue
+                        if COUNTER_TREND_REQUIRE_AGREE and not dir_agree:
+                            _f["역추세근거부족"] += 1
+                            logger.debug(f"{symbol} 역추세인데 15m·1h 불일치 → 제외")
+                            continue
                 else:
                     # 예전 방식 — 20일 일봉 MA 가 방향을 정한다
                     trend = get_trend(slope_d)
@@ -368,6 +386,7 @@ class CoinScanner:
                         _f["1h역행"] += 1
                         continue
                     dir_src, dir_agree = "1d", (trend_4h == trend and trend_1h == trend)
+                    counter = False
 
                 # ── 5. 현재 변동성 (지금 움직이는 코인만) ──
                 recent_vol_1h = 0.0
@@ -413,9 +432,11 @@ class CoinScanner:
                 # 매매의 진입 근거로는 시간축이 맞지 않는다.
                 if RECENCY_ENABLED:
                     adx = calc_adx(hourly1) if len(hourly1) >= 30 else 0.0
-                    if adx < RECENCY_ADX_MIN:
-                        _f["ADX부족"] += 1
-                        logger.debug(f"{symbol} 1h ADX 부족: {adx:.1f} < {RECENCY_ADX_MIN}")
+                    # 역추세는 더 강한 추세 근거를 요구한다
+                    adx_floor = COUNTER_TREND_ADX_MIN if counter else RECENCY_ADX_MIN
+                    if adx < adx_floor:
+                        _f["역추세ADX부족" if counter else "ADX부족"] += 1
+                        logger.debug(f"{symbol} 1h ADX 부족: {adx:.1f} < {adx_floor}")
                         continue
                     consistency = calc_trend_consistency(closes_1h, trend, period=10)
                     adx_ref = 22.0
@@ -473,6 +494,7 @@ class CoinScanner:
                     "trend":         trend,
                     "dir_src":       dir_src,
                     "dir_agree":     dir_agree,
+                    "counter_trend": counter,
                     "trend_4h":      trend_4h,
                     "trend_1h":      trend_1h,
                     "slope_d":       slope_d,
@@ -539,7 +561,8 @@ class CoinScanner:
                          f"모멘텀{c.get('fresh_mom', 0):.2f})"
                          if RECENCY_ENABLED else "")
             logger.info(
-                f"  {c['symbol']:22s} | {c['trend']:4s}({c.get('dir_src', '?')}) | "
+                f"  {c['symbol']:22s} | {c['trend']:4s}({c.get('dir_src', '?')})"
+                f"{'[역추세]' if c.get('counter_trend') else '':6s} | "
                 f"4h:{_arrow(c['trend_4h'], c['trend'])} "
                 f"1h:{_arrow(c['trend_1h'], c['trend'])} | "
                 f"ATR {c['atr_ratio']:.3f} | ADX {c['adx']:.1f} | "
