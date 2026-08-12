@@ -3,8 +3,10 @@
 ───────────────────
     python tests/test_profit_lock.py
 
-실측 사례를 재현한다: 2단계 $240 에서 순수익 $6 까지 갔다가
-트레일 청산 $1. 왜 그렇게 되는지, 락이 무엇을 바꾸는지 검증한다.
+실측 사례를 재현한다: 2단계까지 물탄 포지션이 순수익 $6 까지 갔다가
+트레일 청산 $1 로 끝났다. 왜 그렇게 되는지, 락이 무엇을 바꾸는지 검증한다.
+(당시 시드는 $60·2단계 $240 이었다. 지금은 시드 $100·2단계 $400 —
+ 금액이 아니라 구조가 같으므로 시드 비례로 재현한다.)
 """
 
 import os
@@ -32,14 +34,22 @@ def new_trader(tag: str):
 
 
 def stage2_position(tag: str, entry: float = 1.0):
-    """$240 투입(2단계) 포지션을 만든다"""
+    """2단계까지 물탄 포지션을 만든다 (총투입 = 시드 × 4)
+
+    ⚠ 금액을 하드코딩하지 않는다. 시드는 자본에 따라 달라지고 설계도
+      바뀐다(시드 $60·4단계 → 시드 $100·3단계). 예전에는 $240 을 못박아
+      둬서 시드를 키우자마자 이 테스트가 깨졌다. 검증하려는 건 금액이
+      아니라 **시드 대비 비율**이다.
+    """
     pt = new_trader(tag)
     pt.open_position("XUSDT", "UP", entry)
     p = pt.position
-    # 물타기 2회 → $60 → $120 → $240
+    seed = p.initial_invest
+    # 물타기 2회 → 시드 → ×2 → ×4
     p.apply_avg_down(entry, p.next_avg_down_amount())
     p.apply_avg_down(entry, p.next_avg_down_amount())
-    assert abs(p.total_invested - 240) < 1e-6, p.total_invested
+    assert abs(p.total_invested - seed * 4) < 1e-6, \
+        f"2단계 총투입은 시드×4 여야 한다: 시드 ${seed} / 실제 ${p.total_invested}"
     return pt, p
 
 
@@ -105,12 +115,12 @@ def test_trail_alone_cannot_profit():
 
 def test_lock_saves_the_real_trade():
     """★ 실측 재현 — 순수익 $6 고점에서 무엇이 달라지는가"""
-    print("\n[4] ★ 실측 재현: 2단계 $240, 순수익 $6 고점")
     target_net = 6.0
 
     # 락 없이
     config.PROFIT_LOCK_ENABLED = False
     pt, p = stage2_position("real_off")
+    print(f"\n[4] ★ 실측 재현: 2단계 ${p.total_invested:.0f}, 순수익 $6 고점")
     cost = p._total_cost()
     peak_pct = (target_net + cost) / p.total_invested      # 순 $6 이 되는 포지션 %
     peak_price = price_for_position_pct(p, peak_pct)
