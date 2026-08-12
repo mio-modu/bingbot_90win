@@ -33,13 +33,13 @@ venv/
 .idea/
 *.bak_*
 
-# ── 가져올 과거 기록 (history/) ──────────────────────
+# ── 과거 기록 (history/) ─────────────────────────────
 # 다른 PC 의 모의투자 기록을 여기에 복사해 두면 import_history.py 가 읽는다.
-# 거래 기록은 추적하되 비밀은 어떤 경우에도 들어가지 않도록 재차단한다.
-!history/
-!history/**/*.json
-!history/**/*.jsonl
-!history/**/*.log
-history/**/.env*
-history/**/*.key
-history/**/*.pem
+# reset_state.py 도 초기화할 때 여기로 옮긴다.
+#
+# ⚠ 이 저장소는 공개(public)다. 실거래 손익·잔고·매매 시각은 개인
+#   금융 기록이므로 커밋하지 않는다. 예전에는 !history/ 로 추적을
+#   허용했는데, 저장소를 공개로 바꾼 뒤로는 그대로 두면 그대로 노출된다.
+#   폴더 구조만 남기고 내용은 전부 로컬에만 둔다.
+history/
+!history/README.txt
