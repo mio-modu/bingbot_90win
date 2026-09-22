@@ -25,6 +25,15 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+    # 절전 모드 방지: 이 프로세스가 떠있는 동안 유휴 타이머로 인한 절전 진입 차단
+    # (전원코드가 빠져도 유휴 절전으로 봇이 죽는 사고 방지용 이중 안전장치)
+    ES_CONTINUOUS       = 0x80000000
+    ES_SYSTEM_REQUIRED  = 0x00000001
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+    except Exception:
+        pass
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
@@ -51,8 +60,12 @@ logger = logging.getLogger(__name__)
 NET_HOSTS       = [("8.8.8.8", 53), ("1.1.1.1", 53)]  # 구글 DNS, 클라우드플레어
 NET_TIMEOUT     = 3     # 연결 타임아웃 (초)
 NET_CHECK_SEC   = 5     # 네트워크 점검 주기 (초)
-NET_DOWN_KILL   = 30    # 네트워크 불통 이 초 이상 → 봇 강제 종료
+NET_DOWN_KILL   = 180   # 네트워크 불통 이 초 이상 → 봇 강제 종료
+                        # 30초는 핫스팟 환경에서 너무 민감했다(40초마다 끊김 → 매번 봇 사살).
+                        # 3분 연속 불통일 때만 종료. 중간에 한 번이라도 붙으면 타이머 리셋.
+NET_WAIT_MAX    = 600   # 봇 종료 후 이 초 넘게 복구 안 되면 그냥 재시작 (34시간 정지 사고 방지)
 RESTART_DELAY   = 15    # 재시작 전 대기 (초)
+HEARTBEAT_SEC   = 1800  # 생존 로그 주기 (초) - 상태 전환 없으면 로그가 조용해서 사망처럼 보이는 문제 방지
 MIN_RUN_SEC     = 10    # 이 초 미만 실행 후 종료 = 빠른 실패
 MAX_QUICK_FAIL  = 5     # 빠른 실패 N회 연속 → 감시자 종료 (무한루프 방지)
 # ──────────────────────────────────────────────────
@@ -86,8 +99,15 @@ def is_network_up() -> bool:
 
 
 def wait_for_network() -> bool:
-    """네트워크 복구 대기. 감시자 종료 요청 시 False 반환."""
+    """네트워크 복구 대기. 감시자 종료 요청 시 False 반환.
+
+    NET_WAIT_MAX를 넘겨도 복구되지 않으면 그냥 봇을 재시작한다.
+    핫스팟처럼 링크가 계속 끊겼다 붙는 환경에서는 워치독의 소켓 점검이
+    계속 실패해 봇을 몇십 시간씩 세워두는 사고가 실제로 발생했다
+    (2026-08-30 22:39 ~ 09-01 09:21, 34.7시간 정지).
+    간헐적으로라도 인터넷이 살아있으면 봇 자체 API 재시도가 처리하는 편이 낫다."""
     notified = False
+    started = time.time()
     while not _stop:
         if is_network_up():
             if notified:
@@ -96,6 +116,12 @@ def wait_for_network() -> bool:
         if not notified:
             logger.warning("★ 네트워크 끊김 - 재연결 대기 중...")
             notified = True
+        if time.time() - started >= NET_WAIT_MAX:
+            logger.warning(
+                f"★ 네트워크 미복구 {NET_WAIT_MAX}초 경과 → 그래도 봇 재시작 "
+                f"(봇 자체 재시도에 맡김)"
+            )
+            return True
         time.sleep(NET_CHECK_SEC)
     return False
 
@@ -120,6 +146,7 @@ def run_bot(no_menu: bool = False) -> int:
 
     _current_proc = subprocess.Popen(args, **kwargs)
     net_down_since = None
+    last_heartbeat = time.time()
 
     while True:
         if _stop:
@@ -154,6 +181,11 @@ def run_bot(no_menu: bool = False) -> int:
                     _current_proc.kill()
                 _current_proc = None
                 return -2
+
+        now = time.time()
+        if now - last_heartbeat >= HEARTBEAT_SEC:
+            logger.info(f"정상 감시 중 (봇 PID {_current_proc.pid}, 네트워크 정상)")
+            last_heartbeat = now
 
         time.sleep(NET_CHECK_SEC)
 

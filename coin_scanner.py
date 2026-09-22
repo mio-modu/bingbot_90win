@@ -40,7 +40,7 @@ MIN_SCORE = 0.01  # ADX·일관성 보너스 추가로 점수 스케일 낮아�
 MAX_24H_CHANGE = 0.15    # 24h 등락률 ±15% 초과 시 제외
 
 # ── 제외 키워드 (지수·원자재 추종 상품) ─────────────────
-EXCLUDE_KEYWORDS = ["GOLD", "NASDAQ", "NCC", "USD2USD", "SP500", "OIL"]
+EXCLUDE_KEYWORDS = ["GOLD", "NASDAQ", "NCC", "NCSK", "USD2USD", "SP500", "OIL"]
 
 # ── 대형 코인 직접 제외 (유통량 과다 → 움직임 둔함) ───────
 EXCLUDE_LARGE_CAPS = {

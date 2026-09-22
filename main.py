@@ -5,6 +5,7 @@ BingX Trading Bot - 메인 실행
 import argparse
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import signal
 import time
@@ -35,7 +36,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot.log", encoding="utf-8")
+        RotatingFileHandler("bot.log", encoding="utf-8", maxBytes=20*1024*1024, backupCount=3)
     ]
 )
 logger = logging.getLogger(__name__)

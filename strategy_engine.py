@@ -75,10 +75,12 @@ class StrategyEngine:
         # BTC 4시간 추세 필터 (30분 캐시)
         self._last_btc_4h_check: float = 0.0
         self._btc_4h_downtrend: bool   = False
+        self._btc_4h_uptrend:   bool   = False
         # 방향별 손실 한도 & 전면 매매 금지
         self._loss_track_date: str      = ""
         self._daily_long_loss: float    = 0.0
         self._daily_short_loss: float   = 0.0
+        self._daily_total_loss: float   = 0.0  # 방향 무관 하루 총 손실
         self._long_blocked: bool        = False
         self._short_blocked: bool       = False
         self._trading_pause_until: float = 0.0
@@ -344,14 +346,22 @@ class StrategyEngine:
             ma_curr = sum(closes[-period:]) / period
             slope = (ma_curr - ma_prev) / ma_prev
             self._btc_4h_downtrend = slope < config.BTC_4H_SLOPE_THRESHOLD
-            logger.info(
-                f"[BTC4h] MA{period} 기울기: {slope:+.4f} "
-                f"({'하락추세⬇ LONG차단' if self._btc_4h_downtrend else '정상'})"
+            self._btc_4h_uptrend   = slope > config.BTC_4H_UP_SLOPE_THRESHOLD
+            trend_label = (
+                "하락추세⬇ LONG차단" if self._btc_4h_downtrend else
+                "상승추세⬆ SHORT차단" if self._btc_4h_uptrend else "정상"
             )
+            logger.info(f"[BTC4h] MA{period} 기울기: {slope:+.4f} ({trend_label})")
         except Exception as e:
             logger.debug(f"BTC 4h 캔들 조회 실패: {e}")
             self._btc_4h_downtrend = False
+            self._btc_4h_uptrend   = False
         return self._btc_4h_downtrend
+
+    def _is_btc_uptrend_4h(self) -> bool:
+        """BTC 4시간 MA 기울기 > BTC_4H_UP_SLOPE_THRESHOLD → True (캐시 공유)."""
+        self._is_btc_downtrend_4h()   # 캐시 갱신 + _btc_4h_uptrend 동시 계산
+        return self._btc_4h_uptrend
 
     # ────────────────────────────────────────────────
     #  방향별 손실 한도 관리
@@ -364,17 +374,33 @@ class StrategyEngine:
         self._loss_track_date  = today
         self._daily_long_loss  = 0.0
         self._daily_short_loss = 0.0
+        self._daily_total_loss = 0.0
         self._long_blocked     = False
         self._short_blocked    = False
         if self._trading_pause_until > 0:
             self._trading_pause_until = 0.0
-        logger.info("[방향차단리셋] 날짜 변경 → 방향별 손실 한도 초기화")
+        logger.info("[방향차단리셋] 날짜 변경 → 방향별/총 손실 한도 초기화")
 
     def _track_direction_loss(self, trend: str, crash_short: bool, pnl: float):
         """청산 후 방향별 손실 누적 → 한도 초과 시 해당 방향 차단."""
         if pnl >= 0:
             return
         self._reset_daily_loss_if_needed()
+
+        # ── 하루 총 손실 하드스톱 ──────────────────────────────
+        self._daily_total_loss += pnl
+        if self._daily_total_loss <= config.DAILY_TOTAL_LOSS_LIMIT:
+            pause_until = time.time() + config.DAILY_TOTAL_LOSS_PAUSE_MIN * 60
+            if pause_until > self._trading_pause_until:
+                self._trading_pause_until = pause_until
+            resume_time = time.strftime("%H:%M", time.localtime(self._trading_pause_until))
+            logger.warning(
+                f"[일일총손실하드스톱] 오늘 총 손실 ${self._daily_total_loss:+.2f} "
+                f"≤ 한도 ${config.DAILY_TOTAL_LOSS_LIMIT:+.0f} → "
+                f"{config.DAILY_TOTAL_LOSS_PAUSE_MIN}분 전면 매매 금지 (재개 예정: {resume_time})"
+            )
+            return
+
         direction = "SHORT" if (trend == "DOWN" or crash_short) else "LONG"
         if direction == "LONG":
             self._daily_long_loss += pnl
@@ -457,6 +483,33 @@ class StrategyEngine:
             logger.debug(f"역방향 캔들 조회 실패: {e}")
             return 0
 
+    def _count_recovery_candles(self, symbol: str, trend: str,
+                                 interval: str = "5m", limit: int = 4) -> int:
+        """
+        짧은 봉(기본 5m) 완성 캔들 중 트렌드와 같은(유리한) 방향 연속 캔들 수 반환.
+        3단계 타임아웃 시 '역방향캔들 없음'만으로 4단계 진입하지 않고,
+        실제 회복 조짐(우리 방향 캔들)이 있는지 별도로 확인하기 위해 사용.
+        (마지막 캔들은 미완성이므로 제외)
+        """
+        try:
+            klines = self.api.get_klines(symbol, interval, limit=limit + 1)
+            completed = klines[:-1] if len(klines) > 1 else klines
+            count = 0
+            for k in reversed(completed):
+                if isinstance(k, list):
+                    o, c = float(k[1]), float(k[4])
+                else:
+                    o, c = float(k["open"]), float(k["close"])
+                is_favorable = (trend == "UP" and c > o) or (trend == "DOWN" and c < o)
+                if is_favorable:
+                    count += 1
+                else:
+                    break
+            return count
+        except Exception as e:
+            logger.debug(f"회복 캔들 조회 실패: {e}")
+            return 0
+
     # ────────────────────────────────────────────────
     #  급락 SHORT 모드
     # ────────────────────────────────────────────────
@@ -535,6 +588,17 @@ class StrategyEngine:
     def tick(self):
         now = time.time()
 
+        # ── 상태 복구: SCANNING 갇힘 방지 ──
+        # SCANNING은 아래 스캔 블록 안에서만 유지되고, 같은 틱 안에서 반드시
+        # IN_POSITION(진입 성공) 또는 IDLE(적합 코인 없음)로 빠져나온다.
+        # 따라서 틱 진입 시점에 SCANNING이면 스캔/진입 도중 예외(API 429 등)로
+        # 튕겨 나가 상태가 영구히 갇힌 것이므로 즉시 IDLE로 되돌린다.
+        if self.state == BotState.SCANNING:
+            logger.warning("[상태복구] SCANNING 갇힘 감지 → IDLE 복구 (30초 후 재스캔)")
+            self.state = BotState.IDLE
+            self._last_scan_time = now - (SCAN_INTERVAL_MIN * 60 - 30)
+            self._last_exit_time = 0.0
+
         # 날짜 변경 시 방향별 손실 카운터 초기화
         self._reset_daily_loss_if_needed()
 
@@ -543,10 +607,14 @@ class StrategyEngine:
 
         # ── IDLE: 청산 후 즉시 or 정기 스캔 후 진입 ──
         if self.state == BotState.IDLE:
-            # ── 전면 매매 금지 체크 ──
+            # ── 전면 매매 금지 체크 (일일총손실하드스톱 포함) ──
             if now < self._trading_pause_until:
                 remaining = (self._trading_pause_until - now) / 60
-                logger.debug(f"[전면매매금지] 잔여 {remaining:.1f}분 → 대기")
+                total_loss_info = (
+                    f" | 오늘 총손실 ${self._daily_total_loss:+.2f}"
+                    if self._daily_total_loss <= config.DAILY_TOTAL_LOSS_LIMIT else ""
+                )
+                logger.debug(f"[전면매매금지] 잔여 {remaining:.1f}분 → 대기{total_loss_info}")
                 return
 
             # ── 급락 SHORT 모드: 빠른 스캔 후 SHORT 진입 ──
@@ -605,10 +673,13 @@ class StrategyEngine:
                     logger.info(f"차단 코인 제외: {set(self._blocked_symbols) or ''} "
                                 f"연속익절쿨다운: {cw_info or ''}")
 
-                # 방향 필터: BTC 4h 하락추세 → LONG 차단
+                # 방향 필터: BTC 4h 하락추세 → LONG 차단 / 상승추세 → SHORT 차단
                 btc_down = self._is_btc_downtrend_4h()
+                btc_up   = self._is_btc_uptrend_4h()
                 if btc_down:
                     logger.info("[BTC4h하락추세] LONG 진입 차단 활성")
+                if btc_up:
+                    logger.info("[BTC4h상승추세] SHORT 진입 차단 활성")
                 if self._long_blocked:
                     logger.info("[LONG차단] 일별 LONG 손실 한도 초과 → LONG 진입 불가")
                 if self._short_blocked:
@@ -630,7 +701,7 @@ class StrategyEngine:
                     (c for c in candidates
                      if c["symbol"] not in blocked
                      and not (c["trend"] == "UP"   and (self._long_blocked or btc_down or dir_block_up))
-                     and not (c["trend"] == "DOWN" and (self._short_blocked or dir_block_down))
+                     and not (c["trend"] == "DOWN" and (self._short_blocked or btc_up  or dir_block_down))
                      and self._check_momentum_cooled(c, just_released_cw)),
                     None
                 )
@@ -882,6 +953,7 @@ class StrategyEngine:
                     if step_age_min >= timeout_min:
                         symbol = p.symbol
                         stage  = p.avg_down_step
+                        advance_to_step4 = False  # 3단계 회복조짐 확인됨 → 청산 대신 4단계 진입 시도
                         # ── 4단계: 5단계와 동일한 결전 로직 (역방향캔들 없으면 회복 대기) ──
                         if stage == 4:
                             if adverse_candles is None:
@@ -904,21 +976,61 @@ class StrategyEngine:
                                 f"[4단계결전] {symbol} | {step_age_min:.0f}분 | "
                                 f"사유:{close_reason_4} → 손절 청산 | 순손익 ${net_pnl:+.2f}"
                             )
+                        # ── 3단계: 4단계와 동일하게 역방향캔들부터 확인 ──
+                        # 역방향캔들 있음 → 하락 추세 지속 확정 → 즉시 청산
+                        # 역방향캔들 없음 → 짧은 봉(5m) 회복캔들 확인
+                        #   회복캔들 충분 → 청산 취소, 아래 '다음 단계 DCA'에서 4단계 진입 시도
+                        #   회복캔들 부족 → 유예 (단, STAGE3_MAX_WAIT_MIN 넘으면 무조건 청산)
+                        elif stage == 3:
+                            if adverse_candles is None:
+                                adverse_candles = self._count_adverse_candles(p.symbol, p.trend)
+                            if adverse_candles == 0:
+                                recovery = self._count_recovery_candles(
+                                    p.symbol, p.trend,
+                                    config.STAGE3_RECOVERY_INTERVAL,
+                                    config.STAGE3_RECOVERY_LOOKBACK,
+                                )
+                                if recovery >= config.STAGE3_RECOVERY_CANDLES_MIN:
+                                    logger.info(
+                                        f"[3단계회복조짐] {symbol} | {step_age_min:.0f}분 | "
+                                        f"{config.STAGE3_RECOVERY_INTERVAL} 회복캔들 {recovery}개 "
+                                        f"→ 청산 취소, 4단계 진입 검토 (순손익 ${net_pnl:+.2f})"
+                                    )
+                                    advance_to_step4 = True
+                                elif step_age_min < config.STAGE3_MAX_WAIT_MIN:
+                                    logger.info(
+                                        f"[3단계유예] {symbol} | {step_age_min:.0f}분 | "
+                                        f"역방향캔들 없음, {config.STAGE3_RECOVERY_INTERVAL} 회복캔들 "
+                                        f"{recovery}개(<{config.STAGE3_RECOVERY_CANDLES_MIN}) → 청산 보류 "
+                                        f"(최대 {config.STAGE3_MAX_WAIT_MIN}분 | 순손익 ${net_pnl:+.2f})"
+                                    )
+                                    return
+                                logger.warning(
+                                    f"[단계타임아웃] {symbol} | 3단계 {step_age_min:.0f}분 "
+                                    f"최대대기 초과, 회복조짐 부족 → 청산 (순손익 ${net_pnl:+.2f})"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[단계타임아웃] {symbol} | 3단계 {step_age_min:.0f}분 "
+                                    f"손실 중(${net_pnl:+.2f}) + 역방향캔들 {adverse_candles}개 → 청산"
+                                )
                         else:
                             logger.warning(
                                 f"[단계타임아웃] {symbol} | {stage}단계 "
                                 f"{step_age_min:.0f}분 손실 중(${net_pnl:+.2f}) → 청산"
                             )
-                        self._close("단계타임아웃청산")
-                        self._last_scan_time = 0
-                        # 2단계 이상 타임아웃 손절 → 24시간 차단 (반복 손실 방지)
-                        block_until = now + 24 * 3600
-                        self._blocked_symbols[symbol] = block_until
-                        self._save_engine_state()
-                        logger.warning(
-                            f"[손절코인차단] {symbol} | {stage}단계 단계타임아웃청산 → 24시간 차단"
-                        )
-                        return
+                        if not advance_to_step4:
+                            self._close("단계타임아웃청산")
+                            self._last_scan_time = 0
+                            # 2단계 이상 타임아웃 손절 → 24시간 차단 (반복 손실 방지)
+                            block_until = now + 24 * 3600
+                            self._blocked_symbols[symbol] = block_until
+                            self._save_engine_state()
+                            logger.warning(
+                                f"[손절코인차단] {symbol} | {stage}단계 단계타임아웃청산 → 24시간 차단"
+                            )
+                            return
+                        # advance_to_step4=True → 청산하지 않고 아래 '다음 단계 DCA'로 진행
 
                 wait_min = (SIDEWAYS_LAST_STAGE_TIMEOUT_MIN if is_last_stage
                             else SIDEWAYS_DCA_WAIT_PER_STEP.get(p.avg_down_step, 10))
@@ -1123,6 +1235,15 @@ class StrategyEngine:
                     self._close("시간교체")
                     return
 
+            # 8-1. 손실 중 장기 보유 강제청산 (횡보 갇힘 방지, DCA 단계 무관 하드캡)
+            if coin_age_min >= config.LOSS_FORCE_CLOSE_MIN and net_pnl < 0:
+                logger.info(
+                    f"[장기손실강제청산] {p.symbol} {coin_age_min:.0f}분 보유 → "
+                    f"순손익 ${net_pnl:+.2f} → 강제 청산"
+                )
+                self._close("장기손실강제청산")
+                return
+
             # 9. 트렌드 반전 체크 (5분 1회 쓰로틀)
             #    ① 수익 구간: 반전 + 거래량 고갈 → 코인 교체
             #    ② DCA 2단계 이상 손실 중: 강한 반전 감지 → 추가손실 방지 탈출
@@ -1183,6 +1304,13 @@ class StrategyEngine:
         logger.info(f"  거래 횟수    : {s['total_trades']}회 "
                     f"({s['win_count']}W / {s['loss_count']}L) "
                     f"승률 {s['win_rate']}%")
+        # 일일 총 손실 현황
+        total_loss_limit = config.DAILY_TOTAL_LOSS_LIMIT
+        if self._daily_total_loss < 0:
+            ratio = self._daily_total_loss / total_loss_limit * 100
+            status = "⛔ 하드스톱 발동" if self._daily_total_loss <= total_loss_limit else f"({ratio:.0f}%)"
+            logger.info(f"  오늘 총손실   : ${self._daily_total_loss:+.2f}  "
+                        f"한도 ${total_loss_limit:.0f}  {status}")
         # 연속 익절 쿨다운 현황
         now = time.time()
         cw_active = {s_: round((t_ - now) / 60, 0)
